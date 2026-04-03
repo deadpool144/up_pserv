@@ -1,18 +1,28 @@
 <!DOCTYPE html>
 <html>
+<head>
+<title>Secure Vault</title>
+<style>
+body { font-family: Arial; text-align: center; }
+#vault { display: none; }
+</style>
+</head>
+
 <body>
 
-<h2>Login</h2>
-<input id="user" placeholder="username">
-<input id="pass" type="password" placeholder="password">
-<button onclick="login()">Login</button>
+<h2>🔐 Enter Access Key</h2>
+<input id="key" placeholder="Enter key">
+<button onclick="login()">Unlock</button>
 
-<h2>Upload</h2>
-<input type="file" id="file">
-<button onclick="upload()">Upload</button>
+<div id="vault">
+  <h2>📂 Vault</h2>
 
-<h2>Files</h2>
-<ul id="files"></ul>
+  <input type="file" id="file">
+  <button onclick="upload()">Upload</button>
+
+  <h3>Files</h3>
+  <ul id="files"></ul>
+</div>
 
 <script src="app.js"></script>
 

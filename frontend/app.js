@@ -1,17 +1,21 @@
 const API = "http://192.168.x.x:8000";
 
 async function login() {
-  await fetch(API + "/login", {
+  const key = document.getElementById("key").value;
+
+  const res = await fetch(API + "/auth", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({
-      username: document.getElementById("user").value,
-      password: document.getElementById("pass").value
-    }),
+    body: JSON.stringify({key}),
     credentials: "include"
   });
 
-  loadFiles();
+  if (res.ok) {
+    document.getElementById("vault").style.display = "block";
+    loadFiles();
+  } else {
+    alert("Wrong key");
+  }
 }
 
 async function upload() {
@@ -39,7 +43,7 @@ async function loadFiles() {
   list.innerHTML = "";
   data.files.forEach(f => {
     const li = document.createElement("li");
-    li.innerText = f;
+    li.innerHTML = `<a href="${API}/download/${f}">${f}</a>`;
     list.appendChild(li);
   });
 }
