@@ -1,4 +1,4 @@
-const API = "http://192.168.x.x:8000";
+const API = "http://192.168.x.x:8000"; // CHANGE THIS
 
 async function login() {
   const key = document.getElementById("key").value;
@@ -38,12 +38,31 @@ async function loadFiles() {
   });
 
   const data = await res.json();
-  const list = document.getElementById("files");
+  const container = document.getElementById("files");
 
-  list.innerHTML = "";
-  data.files.forEach(f => {
-    const li = document.createElement("li");
-    li.innerHTML = `<a href="${API}/download/${f}">${f}</a>`;
-    list.appendChild(li);
+  container.innerHTML = "";
+
+  data.files.forEach(file => {
+    const div = document.createElement("div");
+
+    const url = API + "/view/" + file;
+
+    // image preview
+    if (file.match(/\.(jpg|png|jpeg|gif)$/i)) {
+      div.innerHTML += `<img src="${url}">`;
+    }
+
+    // video preview
+    else if (file.match(/\.(mp4|webm)$/i)) {
+      div.innerHTML += `<video controls src="${url}"></video>`;
+    }
+
+    div.innerHTML += `
+      <p>${file}</p>
+      <a href="${API}/download/${file}">Download</a>
+      <hr>
+    `;
+
+    container.appendChild(div);
   });
 }

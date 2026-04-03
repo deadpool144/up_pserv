@@ -1,13 +1,13 @@
-from flask import Flask, request, jsonify, session, send_file
+from flask import Flask, request, jsonify, session, send_file, Response
 from flask_cors import CORS
-import os
+import os, mimetypes
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = "sessionsecret"
+app.secret_key = "secret123"
 
 CORS(app, supports_credentials=True)
 
@@ -16,7 +16,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 ACCESS_KEY = os.getenv("ACCESS_KEY")
 
-# encryption key
+# encryption setup
 if not os.path.exists("key.key"):
     with open("key.key", "wb") as f:
         f.write(Fernet.generate_key())
@@ -24,21 +24,31 @@ if not os.path.exists("key.key"):
 key = open("key.key", "rb").read()
 cipher = Fernet(key)
 
-# 🔓 key login
+# serve frontend
+@app.route("/")
+def home():
+    return send_file("../frontend/index.html")
+
+# 🔐 auth
 @app.route("/auth", methods=["POST"])
 def auth():
-    data = request.json
-    if data.get("key") == ACCESS_KEY:
+    if request.json.get("key") == ACCESS_KEY:
         session["auth"] = True
         return {"status": "ok"}
-    return {"error": "invalid key"}, 401
+    return {"error": "wrong key"}, 401
 
 # 📂 list files
 @app.route("/files")
 def files():
     if not session.get("auth"):
         return {"error": "unauthorized"}, 401
-    return {"files": os.listdir(UPLOAD_FOLDER)}
+
+    files = []
+    for f in os.listdir(UPLOAD_FOLDER):
+        name = f.replace(".enc", "")
+        files.append(name)
+
+    return {"files": files}
 
 # 📤 upload
 @app.route("/upload", methods=["POST"])
@@ -60,18 +70,26 @@ def download(filename):
     if not session.get("auth"):
         return {"error": "unauthorized"}, 401
 
-    path = os.path.join(UPLOAD_FOLDER, filename)
+    path = os.path.join(UPLOAD_FOLDER, filename + ".enc")
     decrypted = cipher.decrypt(open(path, "rb").read())
 
-    temp = "temp_" + filename.replace(".enc", "")
+    temp = "temp_" + filename
     with open(temp, "wb") as f:
         f.write(decrypted)
 
     return send_file(temp, as_attachment=True)
 
-# 🏠 home
-@app.route("/")
-def home():
-    return "Vault Server Running"
+# 🎥 stream / view
+@app.route("/view/<filename>")
+def view(filename):
+    if not session.get("auth"):
+        return {"error": "unauthorized"}, 401
+
+    path = os.path.join(UPLOAD_FOLDER, filename + ".enc")
+    decrypted = cipher.decrypt(open(path, "rb").read())
+
+    mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+    return Response(decrypted, mimetype=mime)
 
 app.run(host="0.0.0.0", port=8000)
