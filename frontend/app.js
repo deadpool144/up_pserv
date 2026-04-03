@@ -1,4 +1,4 @@
-const API = "http://192.168.x.x:8000"; // CHANGE THIS
+const API = "http://192.168.18.10:8000"; // CHANGE THIS
 
 async function login() {
   const key = document.getElementById("key").value;
