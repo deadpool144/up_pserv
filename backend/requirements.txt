@@ -1,1 +1,6 @@
-touch requirements.txt
+flask
+python-dotenv
+cryptography
+waitress
+opencv-python-headless
+numpy

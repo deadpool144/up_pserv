@@ -1,31 +1,185 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-<title>Secure Vault</title>
-<style>
-body { font-family: Arial; text-align: center; }
-#vault { display: none; }
-img, video { max-width: 300px; margin: 10px; }
-</style>
-</head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>SecurVault — Private Media Server</title>
+    <meta name="description" content="Encrypted private media server for local network streaming">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+    <link rel="stylesheet" href="/css/style.css?v=1.1">
 
+</head>
 <body>
 
-<h2>🔐 Enter Access Key</h2>
-<input id="key" placeholder="Enter key">
-<button onclick="login()">Unlock</button>
+<!-- ═══════════════════════════════ AUTH SCREEN ═══════════════════════════ -->
+<section id="auth-screen">
+    <div class="auth-bg-orbs">
+        <div class="orb orb-1"></div>
+        <div class="orb orb-2"></div>
+        <div class="orb orb-3"></div>
+    </div>
+    <div class="auth-card">
+        <div class="auth-logo">
+            <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M24 4L8 10v14c0 9.94 6.84 19.24 16 21.58C33.16 43.24 40 33.94 40 24V10L24 4z" fill="url(#shield-grad)"/>
+                <path d="M18 24l4 4 8-8" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <defs>
+                    <linearGradient id="shield-grad" x1="8" y1="4" x2="40" y2="46" gradientUnits="userSpaceOnUse">
+                        <stop stop-color="#8b5cf6"/>
+                        <stop offset="1" stop-color="#06b6d4"/>
+                    </linearGradient>
+                </defs>
+            </svg>
+        </div>
+        <h1 class="auth-title">SecurVault</h1>
+        <p class="auth-sub">End-to-end encrypted media server</p>
+        <div id="auth-error" class="auth-error hidden">Incorrect access key</div>
+        <input type="password" id="key-input" placeholder="Enter access key" autocomplete="current-password">
+        <button id="btn-login" class="btn-primary">
+            <span id="login-text">Unlock Vault</span>
+            <span id="login-spinner" class="btn-spinner hidden"></span>
+        </button>
+        <p class="auth-hint">🔒 AES-256 encrypted · Local network only</p>
+    </div>
+</section>
 
-<div id="vault">
-  <h2>📂 Vault</h2>
+<!-- ═══════════════════════════════ MAIN APP ══════════════════════════════ -->
+<section id="app-screen" class="hidden">
 
-  <input type="file" id="file">
-  <button onclick="upload()">Upload</button>
+    <!-- Top bar -->
+    <header class="topbar">
+        <div class="topbar-brand">
+            <svg width="22" height="22" viewBox="0 0 48 48" fill="none"><path d="M24 4L8 10v14c0 9.94 6.84 19.24 16 21.58C33.16 43.24 40 33.94 40 24V10L24 4z" fill="url(#tb-grad)"/><path d="M18 24l4 4 8-8" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="tb-grad" x1="0" y1="0" x2="48" y2="48" gradientUnits="userSpaceOnUse"><stop stop-color="#8b5cf6"/><stop offset="1" stop-color="#06b6d4"/></linearGradient></defs></svg>
+            <span>SecurVault</span>
+        </div>
+        <div class="topbar-right">
+            <button id="btn-logout" class="icon-btn" title="Logout">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            </button>
+        </div>
+    </header>
 
-  <h3>Files</h3>
-  <div id="files"></div>
+    <div class="app-body">
+        <!-- Sidebar (desktop) -->
+        <aside class="sidebar">
+            <nav class="sidebar-nav">
+                <button class="nav-btn active" data-view="all">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                    <span>All Files</span>
+                </button>
+                <button class="nav-btn" data-view="videos">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+                    <span>Videos</span>
+                </button>
+                <button class="nav-btn" data-view="images">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                    <span>Images</span>
+                </button>
+                <button class="nav-btn" data-view="files">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+                    <span>Files</span>
+                </button>
+            </nav>
+            <button id="btn-upload-desktop" class="upload-btn-sidebar">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="square" stroke-linejoin="miter"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+                Upload File
+            </button>
+            <div class="sidebar-status">
+                <div class="status-dot"></div>
+                <span>Encrypted · Local</span>
+            </div>
+        </aside>
+
+        <!-- Main content -->
+        <main class="main-content">
+            <div class="content-header">
+                <div>
+                    <h2 id="section-title">All Files</h2>
+                    <div id="file-count" class="file-count"></div>
+                </div>
+            </div>
+            <div id="grid-container" class="grid"></div>
+        </main>
+    </div>
+
+    <!-- Mobile bottom nav -->
+    <nav class="bottom-nav">
+        <button class="nav-btn active" data-view="all">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+            <span>All</span>
+        </button>
+        <button class="nav-btn" data-view="videos">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+            <span>Videos</span>
+        </button>
+        <button class="nav-btn" data-view="images">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+            <span>Images</span>
+        </button>
+        <button class="nav-btn" data-view="files">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+            <span>Files</span>
+        </button>
+    </nav>
+
+    <!-- FAB upload (mobile) -->
+    <button id="btn-upload-mobile" class="fab">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </button>
+</section>
+
+<!-- ═══════════════════════════════ UPLOAD MODAL ══════════════════════════ -->
+<div id="upload-modal" class="modal hidden">
+    <div class="modal-card">
+        <button class="modal-close" id="btn-cancel-upload">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+        <h3>Secure Upload</h3>
+        <p class="modal-sub">Files are encrypted locally before storage</p>
+        <label for="file-input" class="drop-zone" id="drop-zone">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>
+            <span id="drop-label">Tap to select file</span>
+            <span class="drop-hint">Videos, images, any file</span>
+        </label>
+        <input type="file" id="file-input" class="hidden">
+        <div id="upload-progress" class="upload-progress hidden">
+            <div class="ring-wrap">
+                <svg class="ring" viewBox="0 0 80 80">
+                    <circle class="ring-bg" cx="40" cy="40" r="34"/>
+                    <circle class="ring-fill" id="ring-fill" cx="40" cy="40" r="34"/>
+                </svg>
+                <span id="ring-pct">0%</span>
+            </div>
+            <div class="upload-stats">
+                <span id="upload-filename" class="upload-fname"></span>
+                <span id="upload-speed"></span>
+            </div>
+        </div>
+        <div class="modal-actions" id="modal-actions">
+            <button id="btn-start-upload" class="btn-primary" disabled>Start Upload</button>
+        </div>
+    </div>
 </div>
 
-<script src="app.js"></script>
+<!-- ═══════════════════════════════ VIEWER ════════════════════════════════ -->
+<div id="viewer" class="viewer hidden">
+    <button id="btn-close-viewer" class="viewer-close">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+    <div id="viewer-inner"></div>
+</div>
 
+<!-- Download toast -->
+<div id="dl-toast" class="dl-toast hidden">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="8 17 12 21 16 17"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.88 18.09A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.29"/></svg>
+    <div class="dl-info">
+        <span id="dl-name"></span>
+        <div class="dl-bar-bg"><div id="dl-bar" class="dl-bar-fill"></div></div>
+    </div>
+    <span id="dl-pct">0%</span>
+</div>
+
+<script type="module" src="/js/main.js?v=1.1"></script>
 </body>
 </html>

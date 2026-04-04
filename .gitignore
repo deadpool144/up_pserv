@@ -1,5 +1,44 @@
+# ── Secrets ──────────────────────────────────────────────────────────────────
 .env
-backend/key.key
-backend/data/
+*.key
+*.pem
+
+# ── Encrypted data (NEVER commit user files or metadata) ──────────────────────
+data/
+uploads/
+
+# ── Python ───────────────────────────────────────────────────────────────────
 __pycache__/
-/node_modules/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+package-lock.json
+
+# ── Temp / Logs / Trash ───────────────────────────────────────────────────────
+*.log
+*.tmp
+*.part
+temp_*.py
+test.txt
+tests/temp/
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
