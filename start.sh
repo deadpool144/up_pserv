@@ -34,4 +34,13 @@ fi
 
 # 3. Start SecurVault
 echo "Launching SecurVault Desktop & Server..."
+echo "---------------------------------------------------------"
+echo "🌐 ACCESS YOUR VAULT AT:"
+echo "   FRONTEND (UI): http://localhost:5173"
+echo "   BACKEND (API): http://localhost:5001"
+echo "---------------------------------------------------------"
+echo ""
+echo "TIP: Use your device IP (e.g. 192.168.1.x using 'ifconfig')"
+echo "     to access from other phones or laptops on same Wi-Fi."
+echo ""
 npm start

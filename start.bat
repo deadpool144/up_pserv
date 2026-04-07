@@ -23,6 +23,15 @@ if not exist frontend\node_modules (
 echo.
 echo [System] Launching Servers...
 echo.
+echo ---------------------------------------------------------
+echo 🌐 ACCESS YOUR VAULT AT:
+echo    FRONTEND (UI): http://localhost:5173
+echo    BACKEND (API): http://localhost:5001
+echo ---------------------------------------------------------
+echo.
+echo TIP: If on Wi-Fi, use your device IP (e.g. 192.168.1.x) 
+echo      to access from other phones or laptops.
+echo.
 
 npm run dev
 pause
