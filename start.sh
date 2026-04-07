@@ -33,14 +33,19 @@ if [ ! -d "node_modules" ] || [ ! -d "backend/node_modules" ] || [ ! -d "fronten
 fi
 
 # 3. Start SecurVault
+# DYNAMIC IP DISCOVERY (LINUX/TERMUX)
+IP=$(hostname -I | awk '{print $1}')
+if [ -z "$IP" ]; then IP="localhost"; fi
+
 echo "Launching SecurVault Desktop & Server..."
 echo "---------------------------------------------------------"
 echo "🌐 ACCESS YOUR VAULT AT:"
-echo "   FRONTEND (UI): http://localhost:5173"
-echo "   BACKEND (API): http://localhost:5001"
+echo "   LOCAL (HERE): http://localhost:5173"
+echo "   NETWORK (UI): http://$IP:5173"
+echo "   BACKEND (API): http://$IP:5001"
 echo "---------------------------------------------------------"
 echo ""
-echo "TIP: Use your device IP (e.g. 192.168.1.x using 'ifconfig')"
-echo "     to access from other phones or laptops on same Wi-Fi."
+echo "TIP: Enter the NETWORK (UI) link in your phone or laptop"
+echo "     browser while on the same Wi-Fi."
 echo ""
 npm start
