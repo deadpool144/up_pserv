@@ -1,6 +1,7 @@
 import path from 'path';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
+import os from 'os';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,3 +28,10 @@ export const FOLDERS = {
 
 import crypto from 'crypto';
 export const KEY_BUFFER = crypto.createHash('sha256').update(ACCESS_KEY).digest();
+
+// ── System tuning (auto-detected) ────────────────────────────────────────────
+const _cpuLogical = os.cpus().length; // Hyperthreading-aware (e.g. i3-2100 = 4)
+export const CPU_THREADS = Math.max(1, _cpuLogical - 1); // Reserve 1 for Node/Express
+export const IS_LOW_END  = _cpuLogical <= 4;             // i3-2100, older Celerons etc.
+// Local LAN: at most 2 concurrent users. Low-end gets 1 job to stay responsive.
+export const QUEUE_CONCURRENCY = IS_LOW_END ? 1 : 2;

@@ -2,14 +2,34 @@ import { Router } from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { ACCESS_KEY, SECRET_KEY, TOKEN_TTL, THUMBNAIL_DIR, VAULT_DIR, TMP_DIR } from './config.js';
 import { getDetailedListing, findItemPath, getMeta, vaultDataPath, writeToVault, finalizeVaultItem, isVaultItem, saveMeta, indexMoofOffsets } from './storage.js';
-import { generateThumbnail, getVideoDuration, normalizeVideo } from './media.js';
-import { getAesKey, getCipherAtOffset } from './crypto.js';
+import { generateThumbnail, getVideoDuration, normalizeVideo, STREAM_HWM } from './media.js';
+import { getAesKey, getCipherAtOffset, resolveDecryptKey } from './crypto.js';
+import { getHLSIndexCached, setHLSIndexCached, evictHLSCache } from './hlscache.js';
 import fs from 'fs-extra';
 import path from 'path';
 import crypto from 'crypto';
 import mime from 'mime-types';
 
 const router = Router();
+
+// ── HLS Index helper (uses shared in-memory cache) ─────────────────────────────
+async function getHLSIndex(id: string, indexPath: string, fileSize: number): Promise<number[]> {
+    const cached = getHLSIndexCached(id);
+    if (cached) return cached;
+
+    let offsets: number[];
+    if (await fs.pathExists(indexPath)) {
+        offsets = await fs.readJson(indexPath);
+    } else {
+        offsets = [];
+        for (let i = 0; i < fileSize; i += 10 * 1024 * 1024) offsets.push(i);
+    }
+
+    setHLSIndexCached(id, offsets);
+    return offsets;
+}
+
+export { evictHLSCache };  // re-export for convenience (admin reindex route)
 const KEY_BUFFER = getAesKey(ACCESS_KEY);
 
 // ── Token store ───────────────────────────────────────────────────────────────
@@ -53,8 +73,13 @@ router.post('/auth', (req: Request, res: Response) => {
     if (key !== ACCESS_KEY) {
         return res.status(401).json({ error: "Invalid key" });
     }
-    const token = issueToken(userKey || '');
-    res.json({ token, expires_in: TOKEN_TTL });
+    const sanitizedKey = (userKey || '').trim();
+    const token = issueToken(sanitizedKey);
+    res.json({
+        token,
+        expires_in: TOKEN_TTL,
+        hasUserKey: sanitizedKey.length > 0,   // ← tells frontend the session level
+    });
 });
 
 router.delete('/auth', tokenRequired, (req: Request, res: Response) => {
@@ -65,23 +90,34 @@ router.delete('/auth', tokenRequired, (req: Request, res: Response) => {
 
 // ── Files ─────────────────────────────────────────────────────────────────────
 router.get('/files', tokenRequired, async (req: Request, res: Response) => {
-    const limit = parseInt(req.query.limit as string || '20');
+    const limit  = parseInt(req.query.limit  as string || '50');
     const offset = parseInt(req.query.offset as string || '0');
-    const vType = req.query.type as string || 'all';
+    const vType  = req.query.type as string || 'all';
+    const userKey: string = res.locals.userKey || '';
 
     try {
         const detailed = await getDetailedListing(vType);
         const total = detailed.length;
-        const page = detailed.slice(offset, offset + limit);
+        const page  = detailed.slice(offset, offset + limit);
 
-        const resItems = await Promise.all(page.map(async (d) => ({
-            id: d.id,
-            name: d.name,
-            size: d.size,
-            type: d.type,
-            thumb: await fs.pathExists(path.join(THUMBNAIL_DIR, d.id)),
-            created: d.created_at
-        })));
+        const resItems = await Promise.all(page.map(async (d) => {
+            // Determine effective enc level (handle legacy files)
+            const eLvl: number = d.encLevel ?? (d.isEncrypted === false ? 0 : 1);
+            // Accessible = level 0/1 always, level 2 only if session has a userKey
+            const accessible = eLvl < 2 || userKey.length > 0;
+
+            return {
+                id: d.id,
+                name: d.name,
+                size: d.size,
+                type: d.type,
+                status: d.status ?? 'ready',
+                encLevel: eLvl,
+                accessible,
+                thumb: await fs.pathExists(path.join(THUMBNAIL_DIR, d.id)),
+                created: d.created_at,
+            };
+        }));
 
         res.json({ items: resItems, total });
     } catch (err) {
@@ -92,11 +128,15 @@ router.get('/files', tokenRequired, async (req: Request, res: Response) => {
 
 router.get('/file/:id', tokenRequired, async (req: Request, res: Response) => {
     const encName = req.params.id as string;
+    const userKey: string = res.locals.userKey || '';
     try {
         const folder = await findItemPath(encName);
         if (!folder) return res.status(404).json({ error: "Not found" });
 
         const meta = await getMeta(folder);
+        const eLvl: number = meta.encLevel ?? (meta.isEncrypted === false ? 0 : 1);
+        const accessible = eLvl < 2 || userKey.length > 0;
+
         res.json({
             id: meta.id,
             name: meta.name,
@@ -105,6 +145,9 @@ router.get('/file/:id', tokenRequired, async (req: Request, res: Response) => {
             type: meta.type,
             created: meta.created_at,
             duration: meta.duration,
+            status: meta.status ?? 'ready',
+            encLevel: eLvl,
+            accessible,
             thumb: await fs.pathExists(path.join(THUMBNAIL_DIR, meta.id))
         });
     } catch (err) {
@@ -144,17 +187,22 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
         }
 
         const length = end - start + 1;
+        const isPDF = meta.type.includes('pdf');
+        const isImage = meta.type.startsWith('image/');
         const headers: any = {
             "Content-Length": length,
             "Accept-Ranges": "bytes",
             "Content-Type": meta.type || "application/octet-stream",
-            "Cache-Control": "no-cache",
-            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": isImage ? "private, max-age=300" : "no-cache",
         };
 
         if (isDownload) {
             const safeName = meta.name.replace(/"/g, "_");
             headers["Content-Disposition"] = `attachment; filename="${safeName}"`;
+        } else if (isPDF) {
+            // Force inline display for PDF viewer iframe
+            headers["Content-Disposition"] = `inline; filename="${meta.name}"`;
+            headers["X-Frame-Options"] = "SAMEORIGIN";
         }
 
         res.setHeader("Accept-Ranges", "bytes");
@@ -211,7 +259,7 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
 
             const ffmpeg = spawnStreamProcessor(req, true, inputOptions);
 
-            const readStream = fs.createReadStream(dp, { start: startByte });
+            const readStream = fs.createReadStream(dp, { start: startByte, highWaterMark: STREAM_HWM });
             const decryptor = getCipherAtOffset(KEY_BUFFER, nonce, startByte);
 
             // Sniffer to verify decryption
@@ -250,15 +298,24 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
             res.setHeader("Content-Range", `bytes ${start}-${end}/${totalSize}`);
         }
 
-        const readStream = fs.createReadStream(dp, { start, end });
+        // ── Key resolution (encLevel system) ───────────────────────────────
+        const userKey: string = res.locals.userKey || '';
+        const eLvl = meta.encLevel ?? (meta.isEncrypted === false ? 0 : 1);
 
-        if (meta.isEncrypted) {
-            const { deriveFinalKey } = await import('./crypto.js');
-            const finalKey = deriveFinalKey(SECRET_KEY, res.locals.userKey || '');
-            const decryptor = getCipherAtOffset(finalKey, nonce, start);
+        // Block access to level-2 files if session has no personal key
+        if (eLvl === 2 && userKey.length === 0) {
+            if (!res.headersSent) res.status(403).json({ error: "Personal key required", encLevel: 2 });
+            return;
+        }
+
+        const decryptKey = resolveDecryptKey(meta.encLevel, meta.isEncrypted, KEY_BUFFER, SECRET_KEY, userKey);
+
+        const readStream = fs.createReadStream(dp, { start, end, highWaterMark: STREAM_HWM });
+
+        if (decryptKey) {
+            const decryptor = getCipherAtOffset(decryptKey, nonce, start);
             readStream.pipe(decryptor).pipe(res);
         } else {
-            console.log(`[Stream] Direct piping unencrypted data`);
             readStream.pipe(res);
         }
     } catch (err) {
@@ -272,105 +329,112 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
 router.get('/stream/:id/v.m3u8', tokenRequired, async (req: Request, res: Response) => {
     try {
         const encId = req.params.id as string;
-        const token = (req.query.token as string) || "";
+        const token = (req.query.token as string) || '';
         const folder = await findItemPath(encId);
-        if (!folder) return res.status(404).send("Not found");
+        if (!folder) return res.status(404).send('Not found');
 
         const meta = await getMeta(folder);
-        if (meta.status === "processing") {
-            return res.status(503).send("Video is still processing...");
+        if (meta.status === 'processing') {
+            return res.status(503).send('Video is still processing...');
         }
-        const indexPath = path.join(folder, "hls_index.json");
-        let offsets: number[] = [];
-        if (await fs.pathExists(indexPath)) {
-            offsets = await fs.readJson(indexPath);
-        } else {
-            console.log(`[HLS] No index found for ${encId}, using fallback 10MB segments`);
-            for (let i = 0; i < meta.size; i += 10 * 1024 * 1024) offsets.push(i);
-        }
+
+        const indexPath = path.join(folder, 'hls_index.json');
+        const offsets = await getHLSIndex(encId, indexPath, meta.size);
 
         const duration = meta.duration || 0;
         const segDuration = offsets.length > 0 ? (duration / offsets.length) : 10;
         const targetDuration = Math.ceil(segDuration) + 2;
 
         let m3u8 = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${targetDuration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI="init.mp4?token=${token}"\n`;
-
         for (let i = 0; i < offsets.length; i++) {
             m3u8 += `#EXTINF:${segDuration.toFixed(3)},\nseg-${i}.m4s?token=${token}\n`;
         }
-        m3u8 += `#EXT-X-ENDLIST`;
+        m3u8 += '#EXT-X-ENDLIST';
 
+        // Playlist can be revalidated after 5s (short TTL in case video re-indexes)
         res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-        res.setHeader('Vary', 'Origin, Range');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.setHeader('Vary', 'Origin');
         res.send(m3u8);
     } catch (err) {
-        res.status(500).send("HLS Error");
+        console.error('[HLS-M3U8]', err);
+        res.status(500).send('HLS Error');
     }
 });
 
 router.get('/stream/:id/init.mp4', tokenRequired, async (req: Request, res: Response) => {
     const encId = req.params.id as string;
     const folder = await findItemPath(encId);
-    if (!folder) return res.status(404).send("Not found");
+    if (!folder) return res.status(404).send('Not found');
     const meta = await getMeta(folder);
     const dp = vaultDataPath(folder);
     const nonce = Buffer.from(meta.nonce, 'base64');
 
-    // Init segment is from 0 to the first moof
-    const indexPath = path.join(folder, "hls_index.json");
-    let end = 128 * 1024 - 1; // Default
-    if (await fs.pathExists(indexPath)) {
-        const offsets = await fs.readJson(indexPath);
-        if (offsets.length > 0) end = offsets[0] - 1;
-    }
+    // Init segment: bytes 0 → first moof offset
+    const indexPath = path.join(folder, 'hls_index.json');
+    const offsets = await getHLSIndex(encId, indexPath, meta.size);
+    const end = offsets.length > 0 ? offsets[0] - 1 : 128 * 1024 - 1;
+    const segLen = end + 1;
 
     res.setHeader('Content-Type', 'video/mp4');
-    const readStream = fs.createReadStream(dp, { start: 0, end });
+    res.setHeader('Content-Length', segLen);
+    // Init segment is immutable once the video is indexed — cache aggressively
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+
+    const readStream = fs.createReadStream(dp, { start: 0, end, highWaterMark: STREAM_HWM });
     const decryptor = getCipherAtOffset(KEY_BUFFER, nonce, 0);
     readStream.on('data', (c) => {
         const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c as any);
         res.write(decryptor.update(chunk));
     });
     readStream.on('end', () => res.end(decryptor.final()));
+    readStream.on('error', (err) => {
+        console.error('[HLS-Init] Read error:', err.message);
+        if (!res.headersSent) res.status(500).end();
+    });
 });
 
 router.get('/stream/:id/seg-:num.m4s', tokenRequired, async (req: Request, res: Response) => {
     const encId = req.params.id as string;
     const segNum = parseInt(req.params.num as string);
     const folder = await findItemPath(encId);
-    if (!folder) return res.status(404).send("Not found");
+    if (!folder) return res.status(404).send('Not found');
     const meta = await getMeta(folder);
     const dp = vaultDataPath(folder);
     const nonce = Buffer.from(meta.nonce, 'base64');
 
-    const indexPath = path.join(folder, "hls_index.json");
-    let start = 0, end = 0;
+    const indexPath = path.join(folder, 'hls_index.json');
+    const offsets = await getHLSIndex(encId, indexPath, meta.size);
 
-    if (await fs.pathExists(indexPath)) {
-        const offsets = await fs.readJson(indexPath);
-        if (segNum >= offsets.length) return res.status(404).send("End of stream");
+    let start: number, end: number;
+    if (offsets.length > 0) {
+        if (segNum >= offsets.length) return res.status(404).send('End of stream');
         start = offsets[segNum];
         end = (segNum + 1 < offsets.length) ? offsets[segNum + 1] - 1 : meta.size - 1;
     } else {
-        // Fallback
         const chunkSize = 2 * 1024 * 1024;
         start = segNum * chunkSize;
         end = Math.min(start + chunkSize - 1, meta.size - 1);
     }
 
+    const segLen = end - start + 1;
     res.setHeader('Content-Type', 'video/iso.segment');
+    res.setHeader('Content-Length', segLen);
+    // Segments are immutable; browsers/hls.js can cache them safely
+    res.setHeader('Cache-Control', 'public, max-age=3600, immutable');
+
     try {
-        const readStream = fs.createReadStream(dp, { start, end });
+        const readStream = fs.createReadStream(dp, { start, end, highWaterMark: STREAM_HWM });
         const decryptor = getCipherAtOffset(KEY_BUFFER, nonce, start);
 
         readStream.on('error', (err) => {
-            console.error("[HLS-Seg] Read Error:", err.message);
+            console.error('[HLS-Seg] Read error:', err.message);
             if (!res.headersSent) res.status(500).end();
         });
 
         readStream.pipe(decryptor).pipe(res);
     } catch (err: any) {
-        console.error("[HLS-Seg] Error:", err.message);
+        console.error('[HLS-Seg] Error:', err.message);
         if (!res.headersSent) res.status(500).end();
     }
 });
@@ -424,54 +488,72 @@ router.delete('/delete/:id', tokenRequired, async (req: Request, res: Response) 
 });
 
 // ── Upload ───────────────────────────────────────────────────────────────────
+// Track uploads that have been initialized (prevents parallel-chunk race on .state creation)
+const _uploadInitLocks = new Set<string>();
+
 router.post('/upload-chunk', tokenRequired, async (req: Request, res: Response) => {
-    const fileId = req.body.file_id as string || "";
-    const chunkIndex = parseInt(req.body.chunk_index as string || '0');
-    const totalChunks = parseInt(req.body.total_chunks as string || '1');
-    const filename = req.body.filename as string || "file";
-    const globalOffset = parseInt(req.body.offset as string || '0');
-    
-    // Forced unencrypted for audio
-    const isAudio = (mime.lookup(filename) || "").toString().startsWith("audio/");
-    const isEncrypted = isAudio ? false : (req.body.is_encrypted === 'true');
+    const fileId       = req.body.file_id      as string || "";
+    const chunkIndex   = parseInt(req.body.chunk_index  as string || '0');
+    const totalChunks  = parseInt(req.body.total_chunks as string || '1');
+    const filename     = req.body.filename     as string || "file";
+    const globalOffset = parseInt(req.body.offset       as string || '0');
     const shouldRandomize = req.body.should_randomize === 'true';
+    const userKey: string = res.locals.userKey || '';
+
+    // ── Determine enc level ───────────────────────────────────────────────
+    const isAudio = (mime.lookup(filename) || "").toString().startsWith("audio/");
+    // Audio is always level 0 (plaintext) so it can stream without personal key
+    let encLevel: 0 | 1 | 2 = isAudio ? 0 : (parseInt(req.body.enc_level as string || '1') as 0 | 1 | 2);
+    // Clamp: can only use level 2 if session actually has a userKey
+    if (encLevel === 2 && userKey.length === 0) encLevel = 1;
+    // Clamp: must be 0, 1, or 2
+    if (![0, 1, 2].includes(encLevel)) encLevel = 1;
 
     const chunkFile = (req as any).files?.chunk;
-    if (!chunkFile || !fileId) {
-        return res.status(400).send("Missing data");
-    }
+    if (!chunkFile || !fileId) return res.status(400).send("Missing data");
 
     const tempDir = path.join(TMP_DIR, fileId);
     await fs.ensureDir(tempDir);
 
-    const statePath = path.join(tempDir, ".state");
+    const statePath = path.join(tempDir, '.state');
     let nonce: Buffer;
 
-    if (await fs.pathExists(statePath)) {
+    // Init lock: only the first chunk creates .state; others wait briefly and read it
+    if (!_uploadInitLocks.has(fileId)) {
+        _uploadInitLocks.add(fileId);
+        nonce = crypto.randomBytes(16);
+        await fs.writeJson(statePath, { nonce: nonce.toString('base64'), encLevel });
+    } else {
+        // Wait up to 200ms for .state to be ready (parallel chunk may beat this one)
+        for (let t = 0; t < 20; t++) {
+            if (await fs.pathExists(statePath)) break;
+            await new Promise(r => setTimeout(r, 10));
+        }
         const state = await fs.readJson(statePath);
         nonce = Buffer.from(state.nonce, 'base64');
-    } else {
-        nonce = crypto.randomBytes(16);
-        await fs.writeJson(statePath, { nonce: nonce.toString('base64') });
     }
 
-    // Derive key only if encryption is requested
-    let finalKey: Buffer | null = null;
-    if (isEncrypted) {
+    // ── Resolve encryption key ────────────────────────────────────────────
+    let encKey: Buffer | null = null;
+    if (encLevel === 1) {
+        encKey = KEY_BUFFER;  // master key
+    } else if (encLevel === 2) {
         const { deriveFinalKey } = await import('./crypto.js');
-        finalKey = deriveFinalKey(SECRET_KEY, res.locals.userKey || '');
+        encKey = deriveFinalKey(SECRET_KEY, userKey);
     }
 
-    const data = chunkFile.tempFilePath ? (await fs.readFile(chunkFile.tempFilePath)) : chunkFile.data;
-    if (!data || data.length === 0) {
-        console.warn("[Upload] Warning: Received empty chunk data");
-    }
+    const data = chunkFile.tempFilePath
+        ? (await fs.readFile(chunkFile.tempFilePath))
+        : chunkFile.data;
+    if (!data || data.length === 0) console.warn("[Upload] Empty chunk");
 
-    await writeToVault(data, finalKey, nonce, globalOffset, tempDir);
+    await writeToVault(data, encKey, nonce, globalOffset, tempDir, chunkIndex === totalChunks - 1);
 
     if (chunkIndex === totalChunks - 1) {
         const totalSize = globalOffset + data.length;
-        await finalizeVaultItem(tempDir, filename, nonce, totalSize, isEncrypted, shouldRandomize, finalKey);
+        await finalizeVaultItem(tempDir, filename, nonce, totalSize, encLevel, shouldRandomize, encKey);
+        _uploadInitLocks.delete(fileId);  // cleanup lock
+        console.log(`[Upload] Done: ${filename} encLevel=${encLevel}`);
     }
 
     res.send("OK");
@@ -644,6 +726,7 @@ router.get('/admin/reindex', tokenRequired, async (req: Request, res: Response) 
 
                     const offsets = await indexMoofOffsets(dp, newNonce);
                     await fs.writeJson(path.join(p, "hls_index.json"), offsets);
+                    evictHLSCache(id); // ← flush in-memory cache so next request re-reads
 
                     // 5. Cleanup
                     if (await fs.pathExists(rawTmp)) await fs.remove(rawTmp);

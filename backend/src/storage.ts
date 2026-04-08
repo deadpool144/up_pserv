@@ -31,7 +31,16 @@ export interface FileMeta {
     created_at: number;
     duration?: number;
     status?: "ready" | "processing" | "error";
-    isEncrypted: boolean;
+    /** 
+     * Encryption level:
+     *  0 = plaintext
+     *  1 = master key (sha256(ACCESS_KEY)) — accessible to any authenticated user
+     *  2 = personal key (sha256(SECRET_KEY+userKey)) — requires personal key at login
+     * undefined = legacy files, treated as level 1
+     */
+    encLevel?: 0 | 1 | 2;
+    /** @deprecated use encLevel instead. kept for backward compat reading */
+    isEncrypted?: boolean;
     thumb?: boolean;
 }
 
@@ -123,38 +132,46 @@ export async function getDetailedListing(v_type: string = "all") {
     return detailed;
 }
 
-/**
- * 🔥 FIXED: Safe encrypted write
- */
+// ── Per-upload persistent file handles (avoid open/close per chunk) ──────────
+const _openHandles = new Map<string, number>();
+
 export async function writeToVault(
     data: Buffer,
     key: Buffer | null,
     nonce: Buffer,
     globalOffset: number,
-    folder: string
+    folder: string,
+    isLastChunk = false
 ) {
     const dp = vaultDataPath(folder);
 
-    let finalData = data;
-    if (key) {
-        finalData = processChunk(data, key, nonce, globalOffset);
-    }
+    const finalData = key ? processChunk(data, key, nonce, globalOffset) : data;
 
     await fs.ensureFile(dp);
 
-    const fd = await fs.open(dp, 'r+').catch(() => fs.open(dp, 'w'));
+    // Reuse open file descriptor for the lifetime of this upload
+    let fd = _openHandles.get(folder);
+    if (fd === undefined) {
+        fd = await fs.open(dp, 'r+').catch(() => fs.open(dp, 'w'));
+        _openHandles.set(folder, fd);
+    }
 
     await fs.write(fd, finalData, 0, finalData.length, globalOffset);
-    await fs.close(fd);
+
+    if (isLastChunk) {
+        await fs.close(fd);
+        _openHandles.delete(folder);
+    }
 }
 
 /**
  * 🔥 FIXED: Correct decryption + stable scanning
  */
-export async function indexMoofOffsets(dp: string, nonce: Buffer): Promise<number[]> {
+export async function indexMoofOffsets(dp: string, nonce: Buffer, decryptKey?: Buffer): Promise<number[]> {
     const offsets: number[] = [];
 
-    const decipher = getDecipherAtOffset(KEY_BUFFER, nonce, 0); // 🔥 FIX
+    const keyToUse = decryptKey ?? KEY_BUFFER;
+    const decipher = getDecipherAtOffset(keyToUse, nonce, 0);
     const MOOF = Buffer.from('moof');
 
     let position = 0;
@@ -218,24 +235,28 @@ async function generateSafeThumbnail(dp: string, nonce: Buffer, mimeType: string
 }
 
 /**
- * 🔥 FIXED FINALIZE FUNCTION
+ * Finalize a vault item after all chunks are uploaded.
+ * @param encLevel  0=plaintext, 1=master-key, 2=personal-key
+ * @param encKey    The actual key buffer used (null for level 0)
  */
 export async function finalizeVaultItem(
     tempDir: string,
     originalName: string,
     nonce: Buffer,
     totalSize: number,
-    isEncrypted: boolean,
+    encLevel: 0 | 1 | 2,
     shouldRandomize: boolean,
-    derivedKey: Buffer | null
+    encKey: Buffer | null
 ) {
     const enc_name = path.basename(tempDir);
     const mimeType = mime.lookup(originalName) || "application/octet-stream";
 
+    // Classify into sub-folder
     let sub = "files";
     if (mimeType.startsWith("image/")) sub = "images";
     else if (mimeType.startsWith("video/")) sub = "videos";
     else if (mimeType.startsWith("audio/")) sub = "music";
+    else if (mimeType.includes("pdf") || mimeType.includes("document") || mimeType.includes("text")) sub = "documents";
 
     const finalDir = path.join(VAULT_DIR, sub, enc_name);
     await fs.ensureDir(path.dirname(finalDir));
@@ -250,7 +271,8 @@ export async function finalizeVaultItem(
         created_at: Date.now() / 1000,
         duration: 0,
         status: mimeType.startsWith("video/") ? "processing" : "ready",
-        isEncrypted
+        encLevel,
+        isEncrypted: encLevel > 0,  // backward compat flag
     };
 
     await saveMeta(tempDir, meta);
@@ -261,24 +283,22 @@ export async function finalizeVaultItem(
     // Queue video processing
     if (mimeType.startsWith('video/')) {
         const { repairQueue } = await import('./queue.js');
-
         await repairQueue.add({
             id: enc_name,
             folder: finalDir,
             originalName,
-            encryptionKey: derivedKey?.toString('hex')
+            encryptionKey: encKey?.toString('hex')
         });
     }
 
-    // Thumbnail
+    // Thumbnail generation (use the same key that encrypted the data)
     try {
         const dp = vaultDataPath(finalDir);
-        await generateSafeThumbnail(dp, nonce, mimeType, enc_name, derivedKey);
+        await generateSafeThumbnail(dp, nonce, mimeType, enc_name, encKey);
 
         const updatedMeta = await getMeta(finalDir);
         updatedMeta.thumb = true;
         await saveMeta(finalDir, updatedMeta);
-
     } catch (err) {
         console.error("[Storage] Thumbnail failed:", err);
     }

@@ -19,10 +19,13 @@ interface ViewerProps {
 const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext, onPrev }) => {
     const isImage = file.type.startsWith('image/');
     const isVideo = file.type.startsWith('video/') || file.name.toLowerCase().endsWith('.mkv');
-    const isAudio = file.type.startsWith('audio/') || 
-                    ['.mp3', '.flac', '.wav', '.m4a', '.ogg'].some(ext => file.name.toLowerCase().endsWith(ext));
+    const isAudio = file.type.startsWith('audio/') ||
+        ['.mp3', '.flac', '.wav', '.m4a', '.ogg'].some(ext => file.name.toLowerCase().endsWith(ext));
+    const isPDF = file.type.includes('pdf');
+
     const viewerRef = React.useRef<HTMLDivElement>(null);
     const [isIdle, setIsIdle] = React.useState(false);
+    const [imgError, setImgError] = React.useState(false);
     const idleTimerRef = React.useRef<any>(null);
 
     const resetIdleTimer = () => {
@@ -42,6 +45,8 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
         };
     }, []);
 
+    const previewUrl = `/api/preview/${file.id}?token=${token}`;
+
     return (
         <div
             className={`viewer-overlay ${isIdle ? 'ui-hidden' : 'ui-visible'}`}
@@ -50,6 +55,7 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                 if (e.target === e.currentTarget) onClose();
             }}
         >
+            {/* Top action bar */}
             <div className={`viewer-actions ${isIdle ? 'actions-hidden' : 'actions-visible'}`} onClick={(e) => e.stopPropagation()}>
                 <button className="viewer-action-btn" onClick={onClose} title="Close">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
@@ -59,12 +65,13 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                     href={`/api/download/${file.id}?token=${token}`}
                     download={file.name}
                     title="Download"
+                    onClick={(e) => e.stopPropagation()}
                 >
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4m4-5l5 5 5-5m-5 5V3" /></svg>
                 </a>
                 {onDelete && (
                     <button
-                        className="viewer-action-btn text-red-500 hover:bg-red-500/10"
+                        className="viewer-action-btn viewer-action-danger"
                         onClick={() => { if (window.confirm('Confirm Deletion?')) onDelete(file.id); }}
                         title="Delete"
                     >
@@ -73,13 +80,28 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                 )}
             </div>
 
-            <div className={`viewer-content ${file.type.includes('pdf') ? 'full-screen-doc' : ''}`}>
+            {/* Content area */}
+            <div className={`viewer-content ${isPDF ? 'full-screen-doc' : ''}`}>
                 {isImage ? (
-                    <img
-                        src={`/api/preview/${file.id}?token=${token}`}
-                        alt={file.name}
-                        className="viewer-img"
-                    />
+                    imgError ? (
+                        <div className="viewer-generic">
+                            <div className="generic-icon">🖼️</div>
+                            <div className="generic-name">{file.name}</div>
+                            <div className="generic-size">Image failed to load</div>
+                            <a href={previewUrl} className="download-btn-large" target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>
+                                Open in New Tab
+                            </a>
+                        </div>
+                    ) : (
+                        <img
+                            src={previewUrl}
+                            alt={file.name}
+                            className="viewer-img"
+                            onError={() => setImgError(true)}
+                            onClick={(e) => e.stopPropagation()}
+                            draggable={false}
+                        />
+                    )
                 ) : isVideo ? (
                     <VideoPlayer
                         fileId={file.id}
@@ -95,17 +117,27 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                         onNext={onNext}
                         onPrev={onPrev}
                     />
-                ) : file.type.includes('pdf') ? (
-                    <iframe
-                        src={`/api/preview/${file.id}?token=${token}`}
-                        className="viewer-pdf"
-                        title={file.name}
-                    />
+                ) : isPDF ? (
+                    <div className="pdf-viewer-container">
+                        <embed
+                            src={previewUrl}
+                            type="application/pdf"
+                            className="viewer-pdf-embed"
+                            title={file.name}
+                        />
+                        <div className="pdf-fallback">
+                            <span>PDF not rendering?</span>
+                            <a href={previewUrl} target="_blank" rel="noreferrer" className="pdf-open-btn">
+                                Open in New Tab
+                            </a>
+                        </div>
+                    </div>
                 ) : file.type.includes('text') || file.name.endsWith('.txt') || file.name.endsWith('.log') ? (
                     <div className="viewer-text-container">
                         <iframe
-                            src={`/api/preview/${file.id}?token=${token}`}
+                            src={previewUrl}
                             className="viewer-text-frame"
+                            title={file.name}
                         />
                     </div>
                 ) : (
@@ -124,6 +156,7 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                 )}
             </div>
 
+            {/* Footer */}
             <div className={`viewer-footer ${isIdle ? 'footer-hidden' : 'footer-visible'}`} onClick={(e) => e.stopPropagation()}>
                 <div className="viewer-file-info">
                     <span className="file-name">{file.name}</span>

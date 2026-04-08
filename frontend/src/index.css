@@ -26,7 +26,6 @@
     box-sizing: border-box;
     margin: 0;
     padding: 0;
-    border-radius: 0 !important;
     -webkit-tap-highlight-color: transparent;
 }
 
@@ -398,6 +397,100 @@ button {
     /* Prevent flex blow-out */
 }
 
+@media (min-width: 680px) and (max-width: 899px) {
+    /* Tablet: show icon-only sidebar strip */
+    .sidebar {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 72px;
+        flex-shrink: 0;
+        padding: 1.5rem 0.5rem;
+        position: sticky;
+        top: 64px;
+        height: calc(100vh - 64px);
+        border-right: 1px solid var(--border);
+        background: rgba(2, 2, 4, 0.3);
+        gap: 0.5rem;
+        overflow: hidden;
+    }
+
+    .sidebar-nav {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+        flex: 1;
+        width: 100%;
+    }
+
+    .sidebar .nav-btn {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 0.25rem;
+        padding: 0.75rem 0;
+        background: none;
+        border: 1px solid transparent;
+        color: var(--text2);
+        cursor: pointer;
+        width: 100%;
+        transition: 0.2s;
+    }
+
+    .sidebar .nav-btn span {
+        font-size: 0.55rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+
+    .sidebar .nav-btn:hover {
+        background: var(--bg3);
+        color: var(--text);
+        border-color: var(--border);
+    }
+
+    .sidebar .nav-btn.active {
+        color: var(--accent);
+        background: rgba(139, 92, 246, 0.08);
+        border-color: var(--border-h);
+    }
+
+    .upload-btn-sidebar {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 52px;
+        height: 52px;
+        background: var(--grad);
+        color: #fff;
+        border: none;
+        cursor: pointer;
+        border-radius: 50% !important;
+        box-shadow: 0 4px 12px var(--glow);
+        transition: 0.2s;
+        flex-shrink: 0;
+    }
+
+    .upload-btn-sidebar span {
+        display: none;
+    }
+
+    .sidebar-status {
+        display: none;
+    }
+
+    .bottom-nav,
+    .fab {
+        display: none;
+    }
+
+    .main-content {
+        padding: 2rem 1.5rem 4rem;
+    }
+}
+
 @media (min-width: 900px) {
     .main-content {
         padding: 3rem 2.5rem 4rem;
@@ -454,10 +547,14 @@ button {
 .empty-msg {
     grid-column: 1/-1;
     text-align: center;
-    padding: 6rem 1rem;
+    padding: 4rem 1rem;
     color: var(--text2);
     font-size: 1rem;
     border: 1px dashed var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.75rem;
 }
 
 /* ── FILE CARD ────────────────────────────────────────────────────────────── */
@@ -482,8 +579,7 @@ button {
 .card-thumb {
     position: relative;
     width: 100%;
-    min-height: 120px;
-    max-height: 220px;
+    aspect-ratio: 4/3;
     background: var(--bg3);
     overflow: hidden;
 }
@@ -503,11 +599,11 @@ button {
 .file-icon {
     width: 100%;
     height: 100%;
-    min-height: 120px;
+    min-height: 100px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 2.2rem;
+    font-size: 2rem;
     background: var(--bg3);
 }
 
@@ -535,6 +631,8 @@ button {
     letter-spacing: 0.08em;
 }
 
+/* ── Card Actions: always inside the thumbnail corner ─────────────────────── */
+/* Base: always visible, positioned in TOP-RIGHT of the thumb */
 .card-actions {
     position: absolute;
     top: 0.5rem;
@@ -542,15 +640,42 @@ button {
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
+    z-index: 5;
+    /* Default hidden for pointer devices — shown via hover or always-on for touch */
     opacity: 0;
     transform: translateY(-4px);
-    transition: 0.25s;
-    z-index: 5;
+    transition: opacity 0.25s, transform 0.25s;
 }
 
-.file-card:hover .card-actions {
-    opacity: 1;
-    transform: translateY(0);
+/* Desktop pointer: reveal on hover */
+@media (hover: hover) {
+    .file-card:hover .card-actions {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Touch / no-hover: always visible */
+@media (hover: none) {
+    .card-actions {
+        opacity: 1 !important;
+        transform: none !important;
+        /* Still top-right of thumb, never over card-info */
+    }
+
+    .action-btn {
+        width: 44px !important;
+        height: 44px !important;
+        background: rgba(2, 2, 8, 0.85) !important;
+        border-color: rgba(255,255,255,0.15) !important;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6) !important;
+    }
+
+    .btn-del {
+        background: rgba(244, 63, 94, 0.15) !important;
+        color: #fda4af !important;
+        border-color: rgba(244, 63, 94, 0.4) !important;
+    }
 }
 
 .action-btn {
@@ -581,33 +706,7 @@ button {
     box-shadow: 0 0 15px rgba(244, 63, 94, 0.3);
 }
 
-/* Mobile Actions Persistence & Size Override */
-@media (max-width: 900px) {
-    .card-actions {
-        opacity: 1 !important;
-        visibility: visible !important;
-        transform: none !important;
-        top: auto;
-        bottom: 0.5rem;
-        right: 0.5rem;
-        flex-direction: row;
-        gap: 0.6rem;
-    }
-
-    .action-btn {
-        width: 48px !important;
-        height: 48px !important;
-        background: rgba(2, 2, 8, 0.85) !important;
-        border-color: var(--border) !important;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6) !important;
-    }
-
-    .btn-del {
-        background: rgba(244, 63, 94, 0.1) !important;
-        color: #fda4af;
-        border-color: rgba(244, 63, 94, 0.3) !important;
-    }
-}
+/* card-info needs no extra padding since actions are in the thumb */
 
 /* Play overlay (Sharp Square) */
 .play-overlay {
@@ -646,6 +745,125 @@ button {
 .play-icon svg {
     margin-left: 2px;
 }
+
+/* ── CARD STATE VARIANTS ─────────────────────────────────────────────────── */
+
+/* Processing card — subdued */
+.card-processing {
+    opacity: 0.8;
+    cursor: default !important;
+}
+
+/* Locked card — dimmed, no-action cursor */
+.card-locked {
+    opacity: 0.65;
+    cursor: not-allowed !important;
+    filter: saturate(0.3);
+}
+
+.card-locked:hover {
+    transform: none !important;
+    box-shadow: none !important;
+    border-color: rgba(244, 63, 94, 0.35) !important;
+}
+
+/* Processing overlay */
+.processing-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(4, 4, 12, 0.82);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6rem;
+    color: var(--text2);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.loader-mini {
+    width: 28px;
+    height: 28px;
+    border: 3px solid rgba(255, 255, 255, 0.1);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+/* Locked overlay */
+.locked-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(4, 4, 12, 0.78);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    color: #fca5a5;
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    pointer-events: none;
+}
+
+.locked-overlay svg {
+    opacity: 0.85;
+}
+
+/* ── ENC BADGES (corner of thumb) ────────────────────────────────────────── */
+.enc-badge {
+    position: absolute;
+    top: 0.45rem;
+    left: 0.45rem;
+    z-index: 6;
+    border-radius: 4px;
+}
+
+/* Purple lock badge — personal-key encrypted */
+.enc-badge-l2 {
+    width: 20px;
+    height: 20px;
+    background: rgba(139, 92, 246, 0.85);
+    border: 1px solid rgba(167, 139, 250, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(4px);
+}
+
+/* Red dot — inaccessible */
+.enc-badge-locked {
+    width: 12px;
+    height: 12px;
+    background: #f43f5e;
+    border: 2px solid rgba(4, 4, 12, 0.8);
+    border-radius: 50%;
+    box-shadow: 0 0 8px rgba(244, 63, 94, 0.7);
+    animation: pulse-red 2s ease-in-out infinite;
+}
+
+@keyframes pulse-red {
+    0%, 100% { box-shadow: 0 0 6px rgba(244, 63, 94, 0.6); }
+    50%       { box-shadow: 0 0 14px rgba(244, 63, 94, 1.0); }
+}
+
+/* Meta tags in the card-info */
+.processing-tag {
+    color: var(--accent);
+    font-size: 0.68rem;
+}
+
+.locked-tag {
+    color: #fca5a5;
+    font-size: 0.68rem;
+}
+
+
 
 /* Skeleton shimmer */
 .skeleton {
@@ -884,13 +1102,20 @@ button {
 
 /* Removed content-shifting rule to prevent layout jump on toggle */
 
-@media (max-width: 768px) {
+@media (max-width: 680px) {
     .right-sidebar {
         width: 100%;
         top: 64px;
         bottom: 72px;
-        /* Bottom nav height */
     }
+}
+
+/* ── Playlist Panel Inner ─────────────────────────────────────────────────── */
+.playlist-panel-inner {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
 }
 
 .playlist-header {

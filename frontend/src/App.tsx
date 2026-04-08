@@ -13,6 +13,7 @@ import type { Playlist } from './components/PlaylistSidebar';
 
 const App: React.FC = () => {
     const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
+    const [hasUserKey, setHasUserKey] = useState<boolean>(() => localStorage.getItem('hasUserKey') === 'true');
     const [currentView, setCurrentView] = useState('all');
     const [files, setFiles] = useState<FileData[]>([]);
     const [playlists, setPlaylists] = useState<Playlist[]>([]);
@@ -28,7 +29,9 @@ const App: React.FC = () => {
 
     const handleLogout = useCallback(() => {
         setToken(null);
+        setHasUserKey(false);
         localStorage.removeItem('token');
+        localStorage.removeItem('hasUserKey');
     }, []);
 
     const fetchPlaylists = useCallback(async () => {
@@ -90,9 +93,11 @@ const App: React.FC = () => {
         } catch (err) { console.error('Delete PL fail:', err); }
     };
 
-    const handleLogin = (newToken: string) => {
+    const handleLogin = (newToken: string, huk: boolean) => {
         setToken(newToken);
+        setHasUserKey(huk);
         localStorage.setItem('token', newToken);
+        localStorage.setItem('hasUserKey', huk ? 'true' : 'false');
     };
 
     const handleDelete = async (id: string) => {
@@ -203,10 +208,11 @@ const App: React.FC = () => {
             </Routes>
 
             {showUpload && (
-                <UploadModal 
-                    token={token} 
-                    onClose={() => setShowUpload(false)} 
-                    onUploadComplete={() => { fetchFiles(); fetchPlaylists(); }} 
+                <UploadModal
+                    token={token}
+                    hasUserKey={hasUserKey}
+                    onClose={() => setShowUpload(false)}
+                    onUploadComplete={() => { fetchFiles(); fetchPlaylists(); }}
                 />
             )}
 

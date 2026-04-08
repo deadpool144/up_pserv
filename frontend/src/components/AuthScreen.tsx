@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 
 interface AuthScreenProps {
-    onLogin: (token: string) => void;
+    onLogin: (token: string, hasUserKey: boolean) => void;
 }
 
 const AuthScreen: React.FC<AuthScreenProps> = ({ onLogin }) => {
@@ -25,7 +25,7 @@ const AuthScreen: React.FC<AuthScreenProps> = ({ onLogin }) => {
             const data = await response.json();
 
             if (response.ok) {
-                onLogin(data.token);
+                onLogin(data.token, !!data.hasUserKey);
             } else {
                 setError(data.error || 'Incorrect access key');
             }
