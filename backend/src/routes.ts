@@ -10,6 +10,8 @@ import fs from 'fs-extra';
 import path from 'path';
 import crypto from 'crypto';
 import mime from 'mime-types';
+import { repairQueue } from './queue.js';
+
 
 const router = Router();
 
@@ -554,8 +556,20 @@ router.post('/upload-chunk', tokenRequired, async (req: Request, res: Response) 
     if (chunkIndex === totalChunks - 1) {
         const totalSize = globalOffset + data.length;
         await finalizeVaultItem(tempDir, filename, nonce, totalSize, encLevel, shouldRandomize, encKey);
+        
+        // Trigger background processing for videos
+        if ((mime.lookup(filename) || "").toString().startsWith("video/")) {
+            repairQueue.add({
+                id: fileId,
+                folder: path.join(VAULT_DIR, "videos", fileId),
+                originalName: filename,
+                encryptionKey: encKey?.toString('hex')
+            });
+        }
+
         _uploadInitLocks.delete(fileId);
         console.log(`[Upload] ✅ Done: ${filename} (encLevel=${encLevel})`);
+
     }
 
     res.send("OK");

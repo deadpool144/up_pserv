@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect } from 'react';
+
 
 interface LayoutProps {
     currentView: string;
@@ -18,6 +19,36 @@ const Layout: React.FC<LayoutProps> = ({
     children 
 }) => {
     const [isPlaylistOpen, setIsPlaylistOpen] = React.useState(false);
+    
+    // ── SECURITY ENFORCEMENT ──────────────────
+    useEffect(() => {
+        const preventDefault = (e: Event) => e.preventDefault();
+        
+        // Disable Right-Click
+        window.addEventListener('contextmenu', preventDefault);
+        // Disable Dragging (saving images by dragging)
+        window.addEventListener('dragstart', preventDefault);
+        // Disable Copy/Cut
+        window.addEventListener('copy', preventDefault);
+        window.addEventListener('cut', preventDefault);
+        
+        // Disable Save Page As (Ctrl+S) and Print (Ctrl+P)
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'p')) {
+                e.preventDefault();
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+
+        return () => {
+            window.removeEventListener('contextmenu', preventDefault);
+            window.removeEventListener('dragstart', preventDefault);
+            window.removeEventListener('copy', preventDefault);
+            window.removeEventListener('cut', preventDefault);
+            window.removeEventListener('keydown', handleKeyDown);
+        };
+    }, []);
+
 
     const navItems = [
         // ... (unchanged)

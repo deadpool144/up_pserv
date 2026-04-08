@@ -41,7 +41,13 @@ body {
     min-height: 100vh;
     overflow-x: hidden;
     line-height: 1.55;
+    /* Security: Disable text selection globally */
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
 }
+
 
 button {
     font-family: inherit;
@@ -1328,6 +1334,20 @@ button {
     background: var(--danger);
     border-color: var(--danger);
     transform: rotate(90deg);
+}
+
+/* ── SECURITY OVERLAYS ───────────────────────────────────────────────────── */
+.no-copy-no-save {
+    user-select: none !important;
+    pointer-events: auto;
+    -webkit-touch-callout: none !important; /* Disable long-press save on mobile */
+}
+
+/* Ensure images cannot be selected or ghost-dragged */
+img, video {
+    -webkit-user-drag: none !important;
+    user-drag: none !important;
+    pointer-events: auto;
 }
 
 #viewer-inner {

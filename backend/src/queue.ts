@@ -15,6 +15,9 @@ import crypto from 'crypto';
 import { pipeline } from 'stream/promises';
 import { getCipherAtOffset, getDecipherAtOffset } from './crypto.js';
 import { evictHLSCache } from './hlscache.js';
+import { getHWCaps } from './hwdetect.js';
+
+
 
 export interface RepairTask {
     id: string;
@@ -118,27 +121,37 @@ class BackgroundQueue {
 
         // ── Job header ────────────────────────────────────────────────────────
         console.log('');
-        console.log(`┌─ [Video] Processing: "${task.originalName}"`);
-
         try {
+            const caps = getHWCaps();
+            console.log(`┌─ [Video] Processing: "${task.originalName}"`);
+            console.log(`│   ├─ Encoder  : ${caps.encoder.toUpperCase()}`);
+            console.log(`│   ├─ Capacity : ${caps.concurrency} concurrent`);
+            
             const meta    = await getMeta(task.folder);
             const dp      = vaultDataPath(task.folder);
             const nonce   = Buffer.from(meta.nonce, 'base64');
             const srcSize = (await fs.stat(dp)).size;
 
-            console.log(`│  File   : ${fmtBytes(srcSize)}`);
-            console.log(`│  ID     : ${task.id}`);
-            console.log(`│  Slot   : ${this.activeJobs}/${this.maxConcurrency}`);
+            console.log(`│   ├─ File     : ${fmtBytes(srcSize)}`);
+            console.log(`│   ├─ ID       : ${task.id}`);
+            console.log(`│   └─ Slot     : ${this.activeJobs}/${this.maxConcurrency}`);
             console.log('│');
 
+            const startTime = Date.now();
+
             let decryptKey: Buffer | null = null;
-            if (meta.isEncrypted) {
+            if (meta.encLevel && meta.encLevel > 0) {
+                if (!task.encryptionKey) throw new Error('Missing decryption key for encrypted video');
+                decryptKey = Buffer.from(task.encryptionKey, 'hex');
+            } else if (meta.isEncrypted) {
+                // backward compat
                 if (!task.encryptionKey) throw new Error('Missing decryption key for encrypted video');
                 decryptKey = Buffer.from(task.encryptionKey, 'hex');
             }
 
             rawTmp  = path.join(TMP_DIR, `${task.id}_raw.mp4`);
             normTmp = path.join(TMP_DIR, `${task.id}_norm.mp4`);
+
 
             // ── Step 1: Decrypt ───────────────────────────────────────────────
             const endDecrypt = stepTimer('Step 1/5  Decrypt to temp');
@@ -155,8 +168,10 @@ class BackgroundQueue {
 
             // ── Step 2: Normalize / transcode ─────────────────────────────────
             const isMKV = task.originalName.toLowerCase().endsWith('.mkv');
-            const modeLabel = isMKV ? 'Full transcode (MKV→MP4)' : 'Remux (copy + faststart)';
+            const method = isMKV ? caps.encoder.toUpperCase() : 'Remux (Copy)';
+            const modeLabel = isMKV ? `Full transcode (MKV→MP4) [Method: ${method}]` : 'Remux (copy + faststart) [Method: Instant]';
             console.log(`  ├─ Step 2/5  ${modeLabel}`);
+
 
             const normStart = Date.now();
             await normalizeVideo(rawTmp, normTmp, isMKV);

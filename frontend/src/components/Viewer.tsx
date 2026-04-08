@@ -88,19 +88,19 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                             <div className="generic-icon">🖼️</div>
                             <div className="generic-name">{file.name}</div>
                             <div className="generic-size">Image failed to load</div>
-                            <a href={previewUrl} className="download-btn-large" target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>
-                                Open in New Tab
-                            </a>
                         </div>
+
                     ) : (
                         <img
                             src={previewUrl}
                             alt={file.name}
-                            className="viewer-img"
+                            className="viewer-img no-copy-no-save"
                             onError={() => setImgError(true)}
                             onClick={(e) => e.stopPropagation()}
                             draggable={false}
+                            onContextMenu={(e) => e.preventDefault()}
                         />
+
                     )
                 ) : isVideo ? (
                     <VideoPlayer
@@ -118,20 +118,19 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                         onPrev={onPrev}
                     />
                 ) : isPDF ? (
-                    <div className="pdf-viewer-container">
+                    <div className="pdf-viewer-container no-copy-no-save">
                         <embed
                             src={previewUrl}
                             type="application/pdf"
                             className="viewer-pdf-embed"
                             title={file.name}
+                            onContextMenu={(e) => e.preventDefault()}
                         />
                         <div className="pdf-fallback">
-                            <span>PDF not rendering?</span>
-                            <a href={previewUrl} target="_blank" rel="noreferrer" className="pdf-open-btn">
-                                Open in New Tab
-                            </a>
+                            <span>PDF Viewer Active</span>
                         </div>
                     </div>
+
                 ) : file.type.includes('text') || file.name.endsWith('.txt') || file.name.endsWith('.log') ? (
                     <div className="viewer-text-container">
                         <iframe

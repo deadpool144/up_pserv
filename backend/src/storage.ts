@@ -291,16 +291,8 @@ export async function finalizeVaultItem(
     }
     if (!moved) throw new Error(`Could not move ${tempDir} → ${finalDir}`);
 
-    // Queue video processing
-    if (mimeType.startsWith('video/')) {
-        const { repairQueue } = await import('./queue.js');
-        await repairQueue.add({
-            id: enc_name,
-            folder: finalDir,
-            originalName,
-            encryptionKey: encKey?.toString('hex')
-        });
-    }
+    // Video queueing moved to routes.ts upload handler to break circular dependency
+
 
     // Thumbnail generation (use the same key that encrypted the data)
     try {

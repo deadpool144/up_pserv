@@ -58,11 +58,13 @@ function parseFFmpegTime(t: string): number {
 function runFFmpeg(
     ffmpegBin: string,
     args: string[],
-    totalDuration?: number   // seconds — enables % + ETA display
+    totalDuration?: number,   // seconds — enables % + ETA display
+    mode: string = 'ffmpeg'   // e.g. 'QSV', 'NVENC', 'CPU', 'Remux'
 ): Promise<void> {
     return new Promise((resolve, reject) => {
         const shortArgs = args.slice(0, 6).join(' ');
-        console.log(`  │   [ffmpeg] ${shortArgs} ...`);
+        console.log(`  │   [${mode}] ${shortArgs} ...`);
+
 
         // Add -progress pipe:2 so FFmpeg emits key=value progress lines
         const fullArgs = ['-progress', 'pipe:2', '-nostats', ...args];
@@ -70,14 +72,14 @@ function runFFmpeg(
 
         const runStart = Date.now();
         let currentTime = 0;
-        let lastPrint = 0;
-        let speed = 0;
-        let stderrBuf = '';
+        let lastPrint   = 0;
+        let speed       = 0;
+        let stderrBuf   = '';
 
         proc.stderr.on('data', (d: Buffer) => {
             stderrBuf += d.toString();
             const lines = stderrBuf.split('\n');
-            stderrBuf = lines.pop() ?? '';   // keep incomplete last line
+            stderrBuf   = lines.pop() ?? '';   // keep incomplete last line
 
             for (const line of lines) {
                 const l = line.trim();
@@ -104,12 +106,12 @@ function runFFmpeg(
                 }
             }
 
-            // Print a live progress line (throttled to ~2 Hz)
+            // Print a live progress line (throttled to every 5 seconds)
             const now = Date.now();
-            if (now - lastPrint >= 500 && currentTime > 0) {
+            if (now - lastPrint >= 5000 && currentTime > 0) {
                 lastPrint = now;
                 const elapsed = (now - runStart) / 1000;
-                let line: string;
+                let logLine: string;
 
                 if (totalDuration && totalDuration > 0) {
                     const pct = Math.min(100, (currentTime / totalDuration) * 100).toFixed(1);
@@ -119,14 +121,15 @@ function runFFmpeg(
                     const eta = remaining > 0
                         ? ` ETA ${remaining < 60 ? Math.round(remaining) + 's' : (remaining / 60).toFixed(1) + 'm'}`
                         : '';
-                    line = `  │   ${pct.padStart(5)}%  pos=${currentTime.toFixed(1)}s  speed=${speed.toFixed(1)}x  elapsed=${Math.round(elapsed)}s${eta}`;
+                    logLine = `  │   ${pct.padStart(5)}%  pos=${currentTime.toFixed(1)}s  speed=${speed.toFixed(1)}x  elapsed=${Math.round(elapsed)}s${eta}`;
                 } else {
-                    line = `  │   pos=${currentTime.toFixed(1)}s  speed=${speed.toFixed(1)}x  elapsed=${Math.round(elapsed)}s`;
+                    logLine = `  │   pos=${currentTime.toFixed(1)}s  speed=${speed.toFixed(1)}x  elapsed=${Math.round(elapsed)}s`;
                 }
 
-                // Overwrite current line in terminal
-                process.stdout.write('\r' + line.padEnd(79));
+                // Standard log for stability (prevents vanishing on Windows)
+                console.log(logLine);
             }
+
         });
 
         proc.on('error', (err) => {
@@ -136,11 +139,9 @@ function runFFmpeg(
 
         proc.on('close', (code) => {
             const elapsed = ((Date.now() - runStart) / 1000).toFixed(1);
+            
+            // No \r cleanup needed as we use console.log
 
-            // If we printed a progress line, move to next line before final message
-            if (currentTime > 0) {
-                process.stdout.write('\n');
-            }
 
             if (code === 0) {
                 console.log(`  │   └─ FFmpeg finished in ${elapsed}s`);
@@ -257,23 +258,23 @@ export async function generateThumbnail(filePath: string | Readable, id: string,
 
                 if (type.startsWith('audio/')) {
                     cmd.output(tmpFile)
-                        .frames(1)
-                        .on('end', () => resolve())
-                        .on('error', (err) => {
-                            console.warn(`[Media] Audio cover extraction failed for ${id}: ${err.message}`);
-                            resolve();
-                        })
-                        .run();
+                       .frames(1)
+                       .on('end', () => resolve())
+                       .on('error', (err) => {
+                           console.warn(`[Media] Audio cover extraction failed for ${id}: ${err.message}`);
+                           resolve();
+                       })
+                       .run();
                 } else {
                     cmd.on('error', (err) => reject(err))
-                        .on('end', () => resolve())
-                        .screenshots({
-                            count: 1,
-                            timestamps: ['1'],
-                            filename: path.basename(tmpFile),
-                            folder: path.dirname(tmpFile),
-                            size: '400x?'
-                        });
+                       .on('end', () => resolve())
+                       .screenshots({
+                           count: 1,
+                           timestamps: ['1'],
+                           filename: path.basename(tmpFile),
+                           folder: path.dirname(tmpFile),
+                           size: '400x?'
+                       });
                 }
             });
 
@@ -326,9 +327,10 @@ export async function normalizeVideo(
             '-c', 'copy',
             '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart',
             '-f', 'mp4', '-y', outputPath
-        ], srcDuration);
+        ], srcDuration, 'Remux');
         return;
     }
+
 
     // ── Full transcode: try each encoder in order ─────────────────────────────
     const caps = getHWCaps();
@@ -338,10 +340,11 @@ export async function normalizeVideo(
         try {
             console.log('  │   [Transcode] Attempting NVENC...');
             if (await fs.pathExists(outputPath)) await fs.remove(outputPath);
-            await runFFmpeg(ffBin, buildNVENCArgs(inputPath, outputPath), srcDuration);
+            await runFFmpeg(ffBin, buildNVENCArgs(inputPath, outputPath), srcDuration, 'NVENC');
+
             const { size } = await fs.stat(outputPath);
             if (size > 100 * 1024) {
-                console.log(`  │   ✅ NVENC OK (${(size / 1024 / 1024).toFixed(1)} MB)`);
+                console.log(`  │   ✅ NVENC OK (${(size/1024/1024).toFixed(1)} MB)`);
                 return;
             }
             console.warn('  │   NVENC output too small, falling through...');
@@ -355,10 +358,11 @@ export async function normalizeVideo(
         try {
             console.log('  │   [Transcode] Attempting QSV...');
             if (await fs.pathExists(outputPath)) await fs.remove(outputPath);
-            await runFFmpeg(ffBin, buildQSVArgs(inputPath, outputPath), srcDuration);
+            await runFFmpeg(ffBin, buildQSVArgs(inputPath, outputPath), srcDuration, 'QSV');
+
             const { size } = await fs.stat(outputPath);
             if (size > 100 * 1024) {
-                console.log(`  │   ✅ QSV OK (${(size / 1024 / 1024).toFixed(1)} MB)`);
+                console.log(`  │   ✅ QSV OK (${(size/1024/1024).toFixed(1)} MB)`);
                 return;
             }
             console.warn('  │   QSV output too small, falling to CPU...');
@@ -370,10 +374,11 @@ export async function normalizeVideo(
     // 3. CPU fallback — always available
     console.log(`  │   [Transcode] CPU fallback (${caps.threads} threads)...`);
     if (await fs.pathExists(outputPath)) await fs.remove(outputPath);
-    await runFFmpeg(ffBin, buildCPUArgs(inputPath, outputPath, caps.threads), srcDuration);
+    await runFFmpeg(ffBin, buildCPUArgs(inputPath, outputPath, caps.threads), srcDuration, 'CPU');
+
     const { size } = await fs.stat(outputPath);
     if (size < 100 * 1024) throw new Error('CPU transcode failed: output too small');
-    console.log(`  │   ✅ CPU OK (${(size / 1024 / 1024).toFixed(1)} MB)`);
+    console.log(`  │   ✅ CPU OK (${(size/1024/1024).toFixed(1)} MB)`);
 }
 
 
@@ -393,7 +398,7 @@ export async function getVideoDuration(inputPath: string): Promise<number> {
 
     // Fast probe (works for most files)
     let data = runProbe(['-v', 'quiet', '-print_format', 'json',
-        '-show_format', '-show_streams', inputPath]);
+                         '-show_format', '-show_streams', inputPath]);
 
     // Deep scan fallback (MKV, TS, etc. with missing headers)
     if (!data || !(data.format?.duration || data.streams?.some((s: any) => s.duration))) {
@@ -524,7 +529,7 @@ export function spawnStreamProcessor(
     });
 
     // ── Suppress stdin errors ─────────────────────────────────────────────────
-    ff.stdin.on('error', () => { });
+    ff.stdin.on('error', () => {});
 
     // ── Log close code ────────────────────────────────────────────────────────
     ff.on('close', (code) => {

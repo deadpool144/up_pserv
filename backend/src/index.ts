@@ -8,10 +8,14 @@ import { detectHW } from './hwdetect.js';
 
 const app = express();
 
-// Initialize required directories
-Object.values(FOLDERS).forEach(async (dirPath) => {
-    await fs.ensureDir(dirPath as string);
-});
+// Initialize required directories sequentially to avoid races
+async function initDirs() {
+    for (const dirPath of Object.values(FOLDERS)) {
+        await fs.ensureDir(dirPath as string);
+    }
+}
+initDirs().catch(err => console.error('[Fatal] Directory init failed:', err));
+
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(cors());
@@ -29,11 +33,11 @@ app.use((err: any, req: any, res: any, next: any) => {
 // File uploads: 2GB limit, temp files for large uploads
 app.use(fileUpload({
     limits: { fileSize: 2000 * 1024 * 1024 },
-    useTempFiles: true,
-    tempFileDir: TMP_DIR,
-    debug: false,
+    useTempFiles : true,
+    tempFileDir  : TMP_DIR,
+    debug        : false,
     preserveExtension: true,
-    abortOnLimit: true,
+    abortOnLimit : true,
     uploadTimeout: 0,        // no timeout on individual chunk receive
     createParentPath: true,
 }));
@@ -68,15 +72,29 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
     // 2. Re-queue any videos interrupted by a previous crash/restart
     try {
         const { repairQueue } = await import('./queue.js');
+        console.log('[Queue] Scanning interrupted tasks...');
         await repairQueue.requeuePendingTasks();
+        console.log('[Queue] Scan complete');
     } catch (err) {
         console.error('[Server] Failed to start repair queue:', err);
     }
 
     console.log('[Server] Ready ✅\n');
+}); 
+
+
+// ── Global Error Handling ───────────────────────────────────────────────────
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('\n[Fatal] Unhandled Rejection at:', promise, '\nReason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+    console.error('\n[Fatal] Uncaught Exception:', err);
+    process.exit(1);
 });
 
 // Keep-alive and timeout tuning for local LAN
-server.keepAliveTimeout = 120_000;     // 2 minutes
-server.headersTimeout = 125_000;     // slightly above keepAlive
-server.requestTimeout = 300_000;     // 5 min — enough for an 8 MB chunk on slow WiFi
+server.keepAliveTimeout = 120_000;
+server.headersTimeout   = 125_000;
+server.requestTimeout   = 300_000;
+
