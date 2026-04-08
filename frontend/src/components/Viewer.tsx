@@ -1,6 +1,8 @@
 import React from 'react';
 import VideoPlayer from './VideoPlayer';
 import AudioPlayer from './AudioPlayer';
+import PdfViewer from './PdfViewer';
+
 
 interface ViewerProps {
     file: {
@@ -118,18 +120,13 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                         onPrev={onPrev}
                     />
                 ) : isPDF ? (
-                    <div className="pdf-viewer-container no-copy-no-save">
-                        <embed
-                            src={previewUrl}
-                            type="application/pdf"
-                            className="viewer-pdf-embed"
-                            title={file.name}
-                            onContextMenu={(e) => e.preventDefault()}
-                        />
-                        <div className="pdf-fallback">
-                            <span>PDF Viewer Active</span>
-                        </div>
-                    </div>
+                    <PdfViewer 
+                        fileUrl={previewUrl} 
+                        fileName={file.name} 
+                        isIdle={isIdle}
+                    />
+
+
 
                 ) : file.type.includes('text') || file.name.endsWith('.txt') || file.name.endsWith('.log') ? (
                     <div className="viewer-text-container">

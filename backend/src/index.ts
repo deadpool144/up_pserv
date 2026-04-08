@@ -4,7 +4,9 @@ import fileUpload from 'express-fileupload';
 import { PORT, FOLDERS, TMP_DIR } from './config.js';
 import routes from './routes.js';
 import fs from 'fs-extra';
+import path from 'path';
 import { detectHW } from './hwdetect.js';
+
 
 const app = express();
 
@@ -14,6 +16,37 @@ async function initDirs() {
         await fs.ensureDir(dirPath as string);
     }
 }
+
+/**
+ * 🧹 The Janitor: Purges stale files from TMP_DIR
+ * @param forceAll  If true, clears everything (startup mode)
+ */
+async function runJanitor(forceAll: boolean = false) {
+    try {
+        if (!(await fs.pathExists(TMP_DIR))) return;
+        
+        const files = await fs.readdir(TMP_DIR);
+        const now = Date.now();
+        let count = 0;
+
+        for (const file of files) {
+            const p = path.join(TMP_DIR, file);
+            const stats = await fs.stat(p);
+
+            // Startup mode (forceAll) or files older than 1 hour
+            const isStale = forceAll || (now - stats.mtimeMs > 60 * 60 * 1000);
+            
+            if (isStale) {
+                await fs.remove(p);
+                count++;
+            }
+        }
+        if (count > 0) console.log(`[Janitor] Cleaned ${count} stale item(s) from temp`);
+    } catch (err) {
+        console.error('[Janitor] Cleanup error:', err);
+    }
+}
+
 initDirs().catch(err => console.error('[Fatal] Directory init failed:', err));
 
 
@@ -53,15 +86,23 @@ app.use('/api', routes);
 
 // ── Startup ───────────────────────────────────────────────────────────────────
 const server = app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`\n[Server] ════════════════════════════════════════════`);
+    console.log(`[Server] ════════════════════════════════════════════`);
     console.log(`[Server] SecurVault Media Server`);
     console.log(`[Server] Listening on http://0.0.0.0:${PORT}`);
     console.log(`[Server] ════════════════════════════════════════════`);
 
-    // 1. Detect hardware capabilities (NVENC → QSV → CPU)
+    // 1. Startup Purge: Clean temporary directory
+    console.log('[Janitor] Performing startup purge...');
+    await runJanitor(true);
+
+    // 2. Schedule periodic cleanup (every 2 hours)
+    setInterval(() => runJanitor(false), 2 * 60 * 60 * 1000);
+
+    // 3. Detect hardware capabilities (NVENC → QSV → CPU)
     try {
         console.log('[Server] Detecting hardware encoder...');
         const caps = await detectHW();
+
         console.log(`[Server] Encoder    : ${caps.encoder.toUpperCase()}`);
         console.log(`[Server] CPU Threads: ${caps.threads} (${caps.isLowEnd ? 'low-end' : 'mid/high-end'} mode)`);
         console.log(`[Server] Queue Jobs : ${caps.concurrency} concurrent (local LAN: 2-user optimized)`);
@@ -69,9 +110,10 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
         console.error('[Server] HW detection failed (will default to CPU):', hwErr);
     }
 
-    // 2. Re-queue any videos interrupted by a previous crash/restart
+    // 4. Re-queue any videos interrupted by a previous crash/restart
     try {
         const { repairQueue } = await import('./queue.js');
+
         console.log('[Queue] Scanning interrupted tasks...');
         await repairQueue.requeuePendingTasks();
         console.log('[Queue] Scan complete');

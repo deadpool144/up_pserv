@@ -385,12 +385,21 @@ router.get('/stream/:id/init.mp4', tokenRequired, async (req: Request, res: Resp
     res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
 
     const readStream = fs.createReadStream(dp, { start: 0, end, highWaterMark: STREAM_HWM });
-    const decryptor = getCipherAtOffset(KEY_BUFFER, nonce, 0);
-    readStream.on('data', (c) => {
-        const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c as any);
-        res.write(decryptor.update(chunk));
-    });
-    readStream.on('end', () => res.end(decryptor.final()));
+    
+    const userKey: string = res.locals.userKey || '';
+    const decryptKey = resolveDecryptKey(meta.encLevel, meta.isEncrypted, KEY_BUFFER, SECRET_KEY, userKey);
+
+    if (decryptKey) {
+        const decryptor = getCipherAtOffset(decryptKey, nonce, 0);
+        readStream.on('data', (c) => {
+            const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c as any);
+            res.write(decryptor.update(chunk));
+        });
+        readStream.on('end', () => res.end(decryptor.final()));
+    } else {
+        readStream.pipe(res);
+    }
+
     readStream.on('error', (err) => {
         console.error('[HLS-Init] Read error:', err.message);
         if (!res.headersSent) res.status(500).end();
@@ -428,14 +437,17 @@ router.get('/stream/:id/seg-:num.m4s', tokenRequired, async (req: Request, res: 
 
     try {
         const readStream = fs.createReadStream(dp, { start, end, highWaterMark: STREAM_HWM });
-        const decryptor = getCipherAtOffset(KEY_BUFFER, nonce, start);
+        
+        const userKey: string = res.locals.userKey || '';
+        const decryptKey = resolveDecryptKey(meta.encLevel, meta.isEncrypted, KEY_BUFFER, SECRET_KEY, userKey);
 
-        readStream.on('error', (err) => {
-            console.error('[HLS-Seg] Read error:', err.message);
-            if (!res.headersSent) res.status(500).end();
-        });
+        if (decryptKey) {
+            const decryptor = getCipherAtOffset(decryptKey, nonce, start);
+            readStream.pipe(decryptor).pipe(res);
+        } else {
+            readStream.pipe(res);
+        }
 
-        readStream.pipe(decryptor).pipe(res);
     } catch (err: any) {
         console.error('[HLS-Seg] Error:', err.message);
         if (!res.headersSent) res.status(500).end();

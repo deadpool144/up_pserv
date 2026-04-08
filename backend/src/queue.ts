@@ -210,7 +210,8 @@ class BackgroundQueue {
             meta.type     = 'video/mp4';
             await saveMeta(task.folder, meta);
 
-            const offsets = await indexMoofOffsets(dp, newNonce);
+            const offsets = await indexMoofOffsets(dp, newNonce, decryptKey);
+
             await fs.writeJson(path.join(task.folder, 'hls_index.json'), offsets);
             evictHLSCache(task.id);
             endIdx();
