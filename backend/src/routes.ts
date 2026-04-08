@@ -2,6 +2,7 @@ import { Router } from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { ACCESS_KEY, SECRET_KEY, TOKEN_TTL, THUMBNAIL_DIR, VAULT_DIR, TMP_DIR } from './config.js';
 import { getDetailedListing, findItemPath, getMeta, vaultDataPath, writeToVault, finalizeVaultItem, isVaultItem, saveMeta, indexMoofOffsets } from './storage.js';
+
 import { generateThumbnail, getVideoDuration, normalizeVideo, STREAM_HWM } from './media.js';
 import { getAesKey, getCipherAtOffset, resolveDecryptKey } from './crypto.js';
 import { getHLSIndexCached, setHLSIndexCached, evictHLSCache } from './hlscache.js';
@@ -547,17 +548,20 @@ router.post('/upload-chunk', tokenRequired, async (req: Request, res: Response) 
         : chunkFile.data;
     if (!data || data.length === 0) console.warn("[Upload] Empty chunk");
 
-    await writeToVault(data, encKey, nonce, globalOffset, tempDir, chunkIndex === totalChunks - 1);
+    await writeToVault(data, encKey, nonce, globalOffset, tempDir);
 
+    // Sequential upload: the last chunk index means we're done
     if (chunkIndex === totalChunks - 1) {
         const totalSize = globalOffset + data.length;
         await finalizeVaultItem(tempDir, filename, nonce, totalSize, encLevel, shouldRandomize, encKey);
-        _uploadInitLocks.delete(fileId);  // cleanup lock
-        console.log(`[Upload] Done: ${filename} encLevel=${encLevel}`);
+        _uploadInitLocks.delete(fileId);
+        console.log(`[Upload] ✅ Done: ${filename} (encLevel=${encLevel})`);
     }
 
     res.send("OK");
 });
+
+
 
 
 // ── Playlists ───────────────────────────────────────────────────────────────

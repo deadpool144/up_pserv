@@ -34,60 +34,46 @@ const UploadModal: React.FC<UploadModalProps> = ({ onClose, onUploadComplete, to
         setProgress(0);
 
         const fileId = 'ul_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6);
-        // Audio is forced to enc_level=0 on the server too, but we send the right value anyway
         const effectiveLevel = isAudio ? 0 : encLevel;
 
-        // ── Optimized chunk parameters for local LAN ────────────────────────
-        const CHUNK_SIZE = 8 * 1024 * 1024;  // 8 MB — reduces HTTP overhead 4x vs 2 MB
-        const CONCURRENCY = 4;               // 4 parallel streams — fills LAN pipe
+        const CHUNK_SIZE = 4 * 1024 * 1024;  // 4 MB chunks — fast enough on LAN, no race conditions
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-        let completedChunks = 0;
 
-        const uploadChunk = async (i: number) => {
-            const start = i * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, file.size);
-            const chunk = file.slice(start, end);
+        try {
+            for (let i = 0; i < totalChunks; i++) {
+                const start = i * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
 
-            const formData = new FormData();
-            formData.append('chunk', chunk);
-            formData.append('file_id', fileId);
-            formData.append('chunk_index', i.toString());
-            formData.append('total_chunks', totalChunks.toString());
-            formData.append('filename', file.name);
-            formData.append('offset', start.toString());
-            formData.append('enc_level', effectiveLevel.toString());
-            formData.append('should_randomize', shouldRandomize.toString());
+                const formData = new FormData();
+                formData.append('chunk', chunk);
+                formData.append('file_id', fileId);
+                formData.append('chunk_index', i.toString());
+                formData.append('total_chunks', totalChunks.toString());
+                formData.append('filename', file.name);
+                formData.append('offset', start.toString());
+                formData.append('enc_level', effectiveLevel.toString());
+                formData.append('should_randomize', shouldRandomize.toString());
 
-            const resp = await fetch(`/api/upload-chunk?token=${token}`, {
-                method: 'POST',
-                body: formData,
-            });
-            if (!resp.ok) throw new Error(`Chunk ${i} failed: ${resp.status}`);
+                const resp = await fetch(`/api/upload-chunk?token=${token}`, {
+                    method: 'POST',
+                    body: formData,
+                });
+                if (!resp.ok) throw new Error(`Chunk ${i} failed: ${resp.status}`);
 
-            completedChunks++;
-            setProgress(Math.round((completedChunks / totalChunks) * 100));
-        };
-
-        // Send chunks in parallel batches of CONCURRENCY
-        for (let i = 0; i < totalChunks; i += CONCURRENCY) {
-            const batch = [];
-            for (let j = i; j < Math.min(i + CONCURRENCY, totalChunks); j++) {
-                batch.push(uploadChunk(j));
+                setProgress(Math.round(((i + 1) / totalChunks) * 100));
             }
-            try {
-                await Promise.all(batch);
-            } catch (err) {
-                console.error('[Upload] Batch failed:', err);
-                setUploading(false);
-                return;
-            }
+        } catch (err) {
+            console.error('[Upload] Failed:', err);
+            setUploading(false);
+            return;
         }
-
 
         setUploading(false);
         onUploadComplete();
         onClose();
     };
+
 
     const encOptions: { level: 0 | 1 | 2; label: string; hint: string; icon: string; disabled?: boolean }[] = [
         {

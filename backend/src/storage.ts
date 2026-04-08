@@ -132,8 +132,9 @@ export async function getDetailedListing(v_type: string = "all") {
     return detailed;
 }
 
-// ── Per-upload persistent file handles (avoid open/close per chunk) ──────────
-const _openHandles = new Map<string, number>();
+// ── Simple sequential chunk writer ───────────────────────────────────────────
+// Chunks arrive one at a time (sequential upload), so no locking needed.
+// We just open the file and write at the correct offset.
 
 export async function writeToVault(
     data: Buffer,
@@ -141,28 +142,23 @@ export async function writeToVault(
     nonce: Buffer,
     globalOffset: number,
     folder: string,
-    isLastChunk = false
+    _isLastChunk = false   // kept for API compat, not needed for sequential
 ) {
     const dp = vaultDataPath(folder);
-
     const finalData = key ? processChunk(data, key, nonce, globalOffset) : data;
 
     await fs.ensureFile(dp);
 
-    // Reuse open file descriptor for the lifetime of this upload
-    let fd = _openHandles.get(folder);
-    if (fd === undefined) {
-        fd = await fs.open(dp, 'r+').catch(() => fs.open(dp, 'w'));
-        _openHandles.set(folder, fd);
-    }
-
-    await fs.write(fd, finalData, 0, finalData.length, globalOffset);
-
-    if (isLastChunk) {
+    // Open for writing (create if missing), write at exact offset, close immediately
+    const flags = globalOffset === 0 ? 'w' : 'r+';
+    const fd = await fs.open(dp, flags).catch(() => fs.open(dp, 'r+'));
+    try {
+        await fs.write(fd, finalData, 0, finalData.length, globalOffset);
+    } finally {
         await fs.close(fd);
-        _openHandles.delete(folder);
     }
 }
+
 
 /**
  * 🔥 FIXED: Correct decryption + stable scanning
@@ -277,8 +273,23 @@ export async function finalizeVaultItem(
 
     await saveMeta(tempDir, meta);
 
+    // Windows holds file locks briefly after close; retry up to 3x with 150ms gap
     if (await fs.pathExists(finalDir)) await fs.remove(finalDir);
-    await fs.move(tempDir, finalDir);
+    let moved = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+            await fs.move(tempDir, finalDir);
+            moved = true;
+            break;
+        } catch (err: any) {
+            if (attempt < 2 && (err.code === 'EPERM' || err.code === 'EBUSY')) {
+                await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+            } else {
+                throw err;
+            }
+        }
+    }
+    if (!moved) throw new Error(`Could not move ${tempDir} → ${finalDir}`);
 
     // Queue video processing
     if (mimeType.startsWith('video/')) {

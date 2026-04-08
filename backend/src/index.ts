@@ -29,11 +29,11 @@ app.use((err: any, req: any, res: any, next: any) => {
 // File uploads: 2GB limit, temp files for large uploads
 app.use(fileUpload({
     limits: { fileSize: 2000 * 1024 * 1024 },
-    useTempFiles : true,
-    tempFileDir  : TMP_DIR,
-    debug        : false,
+    useTempFiles: true,
+    tempFileDir: TMP_DIR,
+    debug: false,
     preserveExtension: true,
-    abortOnLimit : true,
+    abortOnLimit: true,
     uploadTimeout: 0,        // no timeout on individual chunk receive
     createParentPath: true,
 }));
@@ -78,5 +78,5 @@ const server = app.listen(PORT, '0.0.0.0', async () => {
 
 // Keep-alive and timeout tuning for local LAN
 server.keepAliveTimeout = 120_000;     // 2 minutes
-server.headersTimeout   = 125_000;     // slightly above keepAlive
-server.requestTimeout   = 300_000;     // 5 min — enough for an 8 MB chunk on slow WiFi
+server.headersTimeout = 125_000;     // slightly above keepAlive
+server.requestTimeout = 300_000;     // 5 min — enough for an 8 MB chunk on slow WiFi

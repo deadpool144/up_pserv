@@ -46,33 +46,113 @@ function isGPUInitError(msg: string): boolean {
     return GPU_INIT_ERRORS.some(e => msg.toLowerCase().includes(e.toLowerCase()));
 }
 
-// ── Shared FFmpeg runner ──────────────────────────────────────────────────────
-function runFFmpeg(ffmpegBin: string, args: string[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-        console.log(`[Transcode] ffmpeg ${args.slice(0, 6).join(' ')} ...`);
-        const proc = spawn(ffmpegBin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+// ── Parse HH:MM:SS.mmm → seconds ────────────────────────────────────────────
+function parseFFmpegTime(t: string): number {
+    const parts = t.split(':').map(Number);
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return parts[0] || 0;
+}
 
-        const stderrChunks: string[] = [];
+// ── Shared FFmpeg runner with real-time progress ──────────────────────────────
+function runFFmpeg(
+    ffmpegBin: string,
+    args: string[],
+    totalDuration?: number   // seconds — enables % + ETA display
+): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const shortArgs = args.slice(0, 6).join(' ');
+        console.log(`  │   [ffmpeg] ${shortArgs} ...`);
+
+        // Add -progress pipe:2 so FFmpeg emits key=value progress lines
+        const fullArgs = ['-progress', 'pipe:2', '-nostats', ...args];
+        const proc = spawn(ffmpegBin, fullArgs, { stdio: ['ignore', 'ignore', 'pipe'] });
+
+        const runStart = Date.now();
+        let currentTime = 0;
+        let lastPrint = 0;
+        let speed = 0;
+        let stderrBuf = '';
+
         proc.stderr.on('data', (d: Buffer) => {
-            const msg = d.toString();
-            stderrChunks.push(msg);
-            // Log GPU init errors immediately
-            if (isGPUInitError(msg)) {
-                console.warn(`[Transcode] GPU stderr: ${msg.trim()}`);
+            stderrBuf += d.toString();
+            const lines = stderrBuf.split('\n');
+            stderrBuf = lines.pop() ?? '';   // keep incomplete last line
+
+            for (const line of lines) {
+                const l = line.trim();
+
+                // -progress key=value pairs
+                if (l.startsWith('out_time=')) {
+                    const t = l.split('=')[1];
+                    currentTime = parseFFmpegTime(t);
+                } else if (l.startsWith('speed=')) {
+                    speed = parseFloat(l.split('=')[1]) || 0;
+                }
+
+                // Legacy stderr progress line e.g. "frame= 123 fps=45 ... time=00:01:23"
+                if (l.includes('time=') && l.includes('speed=')) {
+                    const tm = l.match(/time=(\d+:\d+:\d+\.?\d*)/);
+                    const sp = l.match(/speed=\s*([\d.]+)x/);
+                    if (tm) currentTime = parseFFmpegTime(tm[1]);
+                    if (sp) speed = parseFloat(sp[1]);
+                }
+
+                // GPU errors
+                if (isGPUInitError(l)) {
+                    console.warn(`\n  │   [GPU] ${l.trim()}`);
+                }
+            }
+
+            // Print a live progress line (throttled to ~2 Hz)
+            const now = Date.now();
+            if (now - lastPrint >= 500 && currentTime > 0) {
+                lastPrint = now;
+                const elapsed = (now - runStart) / 1000;
+                let line: string;
+
+                if (totalDuration && totalDuration > 0) {
+                    const pct = Math.min(100, (currentTime / totalDuration) * 100).toFixed(1);
+                    const remaining = speed > 0
+                        ? ((totalDuration - currentTime) / speed)
+                        : 0;
+                    const eta = remaining > 0
+                        ? ` ETA ${remaining < 60 ? Math.round(remaining) + 's' : (remaining / 60).toFixed(1) + 'm'}`
+                        : '';
+                    line = `  │   ${pct.padStart(5)}%  pos=${currentTime.toFixed(1)}s  speed=${speed.toFixed(1)}x  elapsed=${Math.round(elapsed)}s${eta}`;
+                } else {
+                    line = `  │   pos=${currentTime.toFixed(1)}s  speed=${speed.toFixed(1)}x  elapsed=${Math.round(elapsed)}s`;
+                }
+
+                // Overwrite current line in terminal
+                process.stdout.write('\r' + line.padEnd(79));
             }
         });
 
-        proc.on('error', reject);
+        proc.on('error', (err) => {
+            console.error('\n  │   [FFmpeg Process Error]', err);
+            reject(err);
+        });
+
         proc.on('close', (code) => {
+            const elapsed = ((Date.now() - runStart) / 1000).toFixed(1);
+
+            // If we printed a progress line, move to next line before final message
+            if (currentTime > 0) {
+                process.stdout.write('\n');
+            }
+
             if (code === 0) {
+                console.log(`  │   └─ FFmpeg finished in ${elapsed}s`);
                 resolve();
             } else {
-                const stderr = stderrChunks.join('').slice(-800);
-                reject(new Error(`FFmpeg exited ${code}: ${stderr}`));
+                reject(new Error(`FFmpeg exited with code ${code} after ${elapsed}s`));
             }
         });
     });
 }
+
+
 
 // ── Build encoder args for each backend ──────────────────────────────────────
 function buildNVENCArgs(inputPath: string, outputPath: string): string[] {
@@ -177,23 +257,23 @@ export async function generateThumbnail(filePath: string | Readable, id: string,
 
                 if (type.startsWith('audio/')) {
                     cmd.output(tmpFile)
-                       .frames(1)
-                       .on('end', () => resolve())
-                       .on('error', (err) => {
-                           console.warn(`[Media] Audio cover extraction failed for ${id}: ${err.message}`);
-                           resolve();
-                       })
-                       .run();
+                        .frames(1)
+                        .on('end', () => resolve())
+                        .on('error', (err) => {
+                            console.warn(`[Media] Audio cover extraction failed for ${id}: ${err.message}`);
+                            resolve();
+                        })
+                        .run();
                 } else {
                     cmd.on('error', (err) => reject(err))
-                       .on('end', () => resolve())
-                       .screenshots({
-                           count: 1,
-                           timestamps: ['1'],
-                           filename: path.basename(tmpFile),
-                           folder: path.dirname(tmpFile),
-                           size: '400x?'
-                       });
+                        .on('end', () => resolve())
+                        .screenshots({
+                            count: 1,
+                            timestamps: ['1'],
+                            filename: path.basename(tmpFile),
+                            folder: path.dirname(tmpFile),
+                            size: '400x?'
+                        });
                 }
             });
 
@@ -224,7 +304,6 @@ export async function generateThumbnail(filePath: string | Readable, id: string,
 
 /**
  * Normalizes a video for smooth HLS streaming.
- * 
  * If forceTranscode=true: tries best available GPU encoder, falls back down the chain.
  * If forceTranscode=false: fast remux only (copy streams + faststart).
  */
@@ -236,14 +315,18 @@ export async function normalizeVideo(
     const ffBin = ffmpegPath as string;
     if (!ffBin) throw new Error('FFmpeg path not found');
 
+    // Quick-probe source duration so runFFmpeg can show % + ETA
+    let srcDuration: number | undefined;
+    try { srcDuration = await getVideoDuration(inputPath); } catch { /* non-fatal */ }
+
     if (!forceTranscode) {
-        // Fast path: just remux with faststart, no re-encode
+        // Fast path: remux with faststart, no re-encode
         await runFFmpeg(ffBin, [
             '-i', inputPath,
             '-c', 'copy',
             '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart',
             '-f', 'mp4', '-y', outputPath
-        ]);
+        ], srcDuration);
         return;
     }
 
@@ -253,45 +336,46 @@ export async function normalizeVideo(
     // 1. NVENC
     if (caps.encoder === 'nvenc') {
         try {
-            console.log('[Transcode] Attempting NVENC...');
+            console.log('  │   [Transcode] Attempting NVENC...');
             if (await fs.pathExists(outputPath)) await fs.remove(outputPath);
-            await runFFmpeg(ffBin, buildNVENCArgs(inputPath, outputPath));
+            await runFFmpeg(ffBin, buildNVENCArgs(inputPath, outputPath), srcDuration);
             const { size } = await fs.stat(outputPath);
             if (size > 100 * 1024) {
-                console.log(`[Transcode] ✅ NVENC OK (${Math.round(size / 1024 / 1024)}MB)`);
+                console.log(`  │   ✅ NVENC OK (${(size / 1024 / 1024).toFixed(1)} MB)`);
                 return;
             }
-            console.warn('[Transcode] NVENC output too small, falling through...');
+            console.warn('  │   NVENC output too small, falling through...');
         } catch (e: any) {
-            console.warn(`[Transcode] NVENC failed: ${e.message?.slice(0, 200)}`);
+            console.warn(`  │   NVENC failed: ${e.message?.slice(0, 120)}`);
         }
     }
 
     // 2. QSV
     if (caps.encoder === 'nvenc' || caps.encoder === 'qsv') {
         try {
-            console.log('[Transcode] Attempting QSV...');
+            console.log('  │   [Transcode] Attempting QSV...');
             if (await fs.pathExists(outputPath)) await fs.remove(outputPath);
-            await runFFmpeg(ffBin, buildQSVArgs(inputPath, outputPath));
+            await runFFmpeg(ffBin, buildQSVArgs(inputPath, outputPath), srcDuration);
             const { size } = await fs.stat(outputPath);
             if (size > 100 * 1024) {
-                console.log(`[Transcode] ✅ QSV OK (${Math.round(size / 1024 / 1024)}MB)`);
+                console.log(`  │   ✅ QSV OK (${(size / 1024 / 1024).toFixed(1)} MB)`);
                 return;
             }
-            console.warn('[Transcode] QSV output too small, falling to CPU...');
+            console.warn('  │   QSV output too small, falling to CPU...');
         } catch (e: any) {
-            console.warn(`[Transcode] QSV failed: ${e.message?.slice(0, 200)}`);
+            console.warn(`  │   QSV failed: ${e.message?.slice(0, 120)}`);
         }
     }
 
     // 3. CPU fallback — always available
-    console.log(`[Transcode] CPU fallback (${caps.threads} threads)...`);
+    console.log(`  │   [Transcode] CPU fallback (${caps.threads} threads)...`);
     if (await fs.pathExists(outputPath)) await fs.remove(outputPath);
-    await runFFmpeg(ffBin, buildCPUArgs(inputPath, outputPath, caps.threads));
+    await runFFmpeg(ffBin, buildCPUArgs(inputPath, outputPath, caps.threads), srcDuration);
     const { size } = await fs.stat(outputPath);
     if (size < 100 * 1024) throw new Error('CPU transcode failed: output too small');
-    console.log(`[Transcode] ✅ CPU OK (${Math.round(size / 1024 / 1024)}MB)`);
+    console.log(`  │   ✅ CPU OK (${(size / 1024 / 1024).toFixed(1)} MB)`);
 }
+
 
 /**
  * Probes video duration using ffprobe (async, non-blocking).
@@ -309,7 +393,7 @@ export async function getVideoDuration(inputPath: string): Promise<number> {
 
     // Fast probe (works for most files)
     let data = runProbe(['-v', 'quiet', '-print_format', 'json',
-                         '-show_format', '-show_streams', inputPath]);
+        '-show_format', '-show_streams', inputPath]);
 
     // Deep scan fallback (MKV, TS, etc. with missing headers)
     if (!data || !(data.format?.duration || data.streams?.some((s: any) => s.duration))) {
@@ -440,7 +524,7 @@ export function spawnStreamProcessor(
     });
 
     // ── Suppress stdin errors ─────────────────────────────────────────────────
-    ff.stdin.on('error', () => {});
+    ff.stdin.on('error', () => { });
 
     // ── Log close code ────────────────────────────────────────────────────────
     ff.on('close', (code) => {

@@ -87,25 +87,25 @@ function testEncoder(ffmpegPath: string, encoderName: string): boolean {
                 '-c:v', 'h264_nvenc',
                 '-frames:v', '1',
                 '-f', 'null', nullOut
-              ]
+            ]
             : encoderName === 'h264_qsv'
-            ? [
-                '-hide_banner', '-loglevel', 'error',
-                '-init_hw_device', 'qsv=qsv:hw',
-                '-filter_hw_device', 'qsv',
-                '-f', 'lavfi', '-i', 'color=black:s=128x128:r=1:d=0.1',
-                '-vf', 'hwupload=extra_hw_frames=64,format=qsv',
-                '-c:v', 'h264_qsv',
-                '-frames:v', '1',
-                '-f', 'null', nullOut
-              ]
-            : [
-                '-hide_banner', '-loglevel', 'error',
-                '-f', 'lavfi', '-i', 'color=black:s=128x128:r=1:d=0.1',
-                '-c:v', encoderName,
-                '-frames:v', '1',
-                '-f', 'null', nullOut
-              ];
+                ? [
+                    '-hide_banner', '-loglevel', 'error',
+                    '-init_hw_device', 'qsv=qsv:hw',
+                    '-filter_hw_device', 'qsv',
+                    '-f', 'lavfi', '-i', 'color=black:s=128x128:r=1:d=0.1',
+                    '-vf', 'hwupload=extra_hw_frames=64,format=qsv',
+                    '-c:v', 'h264_qsv',
+                    '-frames:v', '1',
+                    '-f', 'null', nullOut
+                ]
+                : [
+                    '-hide_banner', '-loglevel', 'error',
+                    '-f', 'lavfi', '-i', 'color=black:s=128x128:r=1:d=0.1',
+                    '-c:v', encoderName,
+                    '-frames:v', '1',
+                    '-f', 'null', nullOut
+                ];
 
         const result = spawnSync(ffmpegPath, args, {
             timeout: 8000, // 8s max for init; HDD + old GPU can be slow
