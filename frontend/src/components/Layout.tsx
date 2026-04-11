@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-
+import { useLocation } from 'react-router-dom';
 
 interface LayoutProps {
     currentView: string;
@@ -19,7 +19,13 @@ const Layout: React.FC<LayoutProps> = ({
     children 
 }) => {
     const [isPlaylistOpen, setIsPlaylistOpen] = React.useState(false);
-    
+    const location = useLocation();
+
+    // Auto-close sidebar on navigation
+    useEffect(() => {
+        setIsPlaylistOpen(false);
+    }, [location.pathname, currentView]);
+
     // ── SECURITY ENFORCEMENT ──────────────────
     useEffect(() => {
         const preventDefault = (e: Event) => e.preventDefault();
@@ -127,6 +133,19 @@ const Layout: React.FC<LayoutProps> = ({
                 <main className="main-content">
                     {children}
                 </main>
+
+                {isPlaylistOpen && (
+                    <div 
+                        className="playlist-overlay" 
+                        onClick={() => setIsPlaylistOpen(false)}
+                        style={{
+                            position: 'fixed',
+                            top: 0, left: 0, right: 0, bottom: 0,
+                            background: 'transparent',
+                            zIndex: 90
+                        }}
+                    />
+                )}
 
                 <aside className={`right-sidebar ${isPlaylistOpen ? 'open' : ''}`}>
                     {playlistSidebar}

@@ -2058,3 +2058,50 @@ button {
 .seekbar-wrapper:hover .audio-seekbar::-webkit-slider-thumb {
     transform: scale(1.2);
 }
+
+.nav-arrow {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    background: rgba(0, 0, 0, 0.5);
+    border: none;
+    border-radius: 50%;
+    width: 60px;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 100;
+    transition: 0.2s;
+}
+
+.nav-arrow:hover {
+    background: rgba(0, 0, 0, 0.8);
+}
+
+.prev-arrow { left: 20px; }
+.next-arrow { right: 20px; }
+
+.img-fs {
+    width: 100vw !important;
+    height: 100vh !important;
+    object-fit: contain !important;
+}
+
+.fs-toggle {
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: white;
+    padding: 10px;
+    border-radius: 8px;
+    transition: 0.3s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.fs-toggle:hover {
+    background: rgba(255, 255, 255, 0.1);
+    transform: scale(1.1);
+}

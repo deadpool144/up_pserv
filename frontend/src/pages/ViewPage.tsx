@@ -34,9 +34,25 @@ const ViewPage: React.FC<ViewPageProps> = ({ token }) => {
                     const currentPl = playlists.find((p: any) => p.id === playlistId);
                     if (currentPl) setQueue(currentPl.items);
                 } else if (viewType) {
-                    const res = await fetch(`/api/files?token=${token}&type=${viewType}`);
+                    // Fetch all files and filter locally to ensure homogeneous navigation
+                    const res = await fetch(`/api/files?token=${token}&type=${viewType === 'all' || viewType === 'files' ? 'all' : viewType}`);
                     const listData = await res.json();
-                    if (res.ok) setQueue(listData.items.map((f: any) => f.id));
+                    if (res.ok) {
+                        const isImg = data.type.startsWith('image/');
+                        const isVid = data.type.startsWith('video/') || data.name.toLowerCase().endsWith('.mkv');
+                        const isAud = data.type.startsWith('audio/') || ['.mp3', '.flac', '.wav', '.m4a', '.ogg'].some(ext => data.name.toLowerCase().endsWith(ext));
+
+                        const filtered = listData.items.filter((item: any) => {
+                            // Only restrict types if we are viewing from 'all' or 'files'
+                            if (viewType === 'all' || viewType === 'files') {
+                                if (isImg) return item.type.startsWith('image/');
+                                if (isVid) return item.type.startsWith('video/') || item.name.toLowerCase().endsWith('.mkv');
+                                if (isAud) return item.type.startsWith('audio/') || ['.mp3', '.flac', '.wav', '.m4a', '.ogg'].some(ext => item.name.toLowerCase().endsWith(ext));
+                            }
+                            return true; 
+                        });
+                        setQueue(filtered.map((f: any) => f.id));
+                    }
                 }
             } catch (err: any) {
                 setError(err.message);
@@ -51,21 +67,21 @@ const ViewPage: React.FC<ViewPageProps> = ({ token }) => {
     const handleNext = () => {
         if (queue.length === 0) return;
         const currentIdx = queue.indexOf(id!);
-        if (currentIdx !== -1 && currentIdx < queue.length - 1) {
-            const nextId = queue[currentIdx + 1];
-            const params = playlistId ? `?playlist=${playlistId}` : `?type=${viewType}`;
+        if (currentIdx !== -1) {
+            const nextIdx = (currentIdx + 1) % queue.length;
+            const nextId = queue[nextIdx];
+            const params = playlistId ? `?playlist=${playlistId}` : (viewType ? `?type=${viewType}` : '');
             navigate(`/view/${nextId}${params}`);
-        } else if (currentIdx === queue.length - 1) {
-            navigate(playlistId ? `/playlist/${playlistId}` : '/');
         }
     };
 
     const handlePrev = () => {
         if (queue.length === 0) return;
         const currentIdx = queue.indexOf(id!);
-        if (currentIdx > 0) {
-            const prevId = queue[currentIdx - 1];
-            const params = playlistId ? `?playlist=${playlistId}` : `?type=${viewType}`;
+        if (currentIdx !== -1) {
+            const prevIdx = (currentIdx - 1 + queue.length) % queue.length;
+            const prevId = queue[prevIdx];
+            const params = playlistId ? `?playlist=${playlistId}` : (viewType ? `?type=${viewType}` : '');
             navigate(`/view/${prevId}${params}`);
         }
     };

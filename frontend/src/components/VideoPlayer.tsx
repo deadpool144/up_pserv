@@ -7,9 +7,11 @@ interface VideoPlayerProps {
     token: string;
     onClose?: () => void;
     isIdle?: boolean;
+    onNext?: () => void;
+    onPrev?: () => void;
 }
 
-const VideoPlayer: React.FC<VideoPlayerProps> = ({ fileId, token, isIdle = false }) => {
+const VideoPlayer: React.FC<VideoPlayerProps> = ({ fileId, token, isIdle = false, onNext, onPrev }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const hlsRef = useRef<Hls | null>(null);
@@ -211,6 +213,16 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ fileId, token, isIdle = false
             />
 
             <div className="player-ui">
+                {onPrev && (
+                    <button className="nav-arrow prev-arrow" onClick={(e) => { e.stopPropagation(); onPrev(); }}>
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
+                    </button>
+                )}
+                {onNext && (
+                    <button className="nav-arrow next-arrow" onClick={(e) => { e.stopPropagation(); onNext(); }}>
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg>
+                    </button>
+                )}
                 <div className="center-controls" onClick={togglePlay}>
                     {!isPlaying && !isLoading && !error && (
                         <div className="big-play-btn">

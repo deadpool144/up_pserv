@@ -108,8 +108,8 @@ const AudioPlayer: React.FC<AudioPlayerProps> = ({ fileId, fileName, token, onNe
     const handleSeekChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setCurrentTime(parseFloat(e.target.value));
     };
-    const handleSeekEnd = (e: React.ChangeEvent<HTMLInputElement>) => {
-        const val = parseFloat(e.target.value);
+    const handleSeekEnd = (e: React.MouseEvent<HTMLInputElement> | React.TouchEvent<HTMLInputElement> | any) => {
+        const val = parseFloat(e.currentTarget.value);
         if (audioRef.current) audioRef.current.currentTime = val;
         setSeeking(false);
     };

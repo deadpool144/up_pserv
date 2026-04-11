@@ -14,9 +14,11 @@ interface PdfViewerProps {
     fileUrl: string;
     fileName: string;
     isIdle: boolean;
+    onNext?: () => void;
+    onPrev?: () => void;
 }
 
-const PdfViewer: React.FC<PdfViewerProps> = ({ fileUrl, fileName, isIdle }) => {
+const PdfViewer: React.FC<PdfViewerProps> = ({ fileUrl, isIdle, onNext, onPrev }) => {
     const [numPages, setNumPages] = useState<number | null>(null);
     const [pageNumber, setPageNumber] = useState(1);
     const [scale, setScale] = useState(1.0);
@@ -80,7 +82,6 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ fileUrl, fileName, isIdle }) => {
             className="pdf-view-wrapper no-copy-no-save" 
             onContextMenu={(e) => e.preventDefault()}
             onCopy={(e) => e.preventDefault()}
-            onSelectStart={(e) => e.preventDefault()}
             style={{ userSelect: 'none', WebkitUserSelect: 'none' }}
         >
             <Document
@@ -99,8 +100,13 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ fileUrl, fileName, isIdle }) => {
                     </div>
                 }
             >
+                {onPrev && (
+                    <button className="nav-arrow prev-arrow" onClick={(e) => { e.stopPropagation(); onPrev(); }}>
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
+                    </button>
+                )}
                 <div className="pdf-page-container" ref={containerRef}>
-                    {numPages && Array.from(new Array(numPages), (el, index) => (
+                    {numPages && Array.from(new Array(numPages), (_, index) => (
                         <div 
                             key={`page_${index + 1}`} 
                             className="pdf-page-wrapper"
@@ -121,6 +127,11 @@ const PdfViewer: React.FC<PdfViewerProps> = ({ fileUrl, fileName, isIdle }) => {
                         </div>
                     ))}
                 </div>
+                {onNext && (
+                    <button className="nav-arrow next-arrow" onClick={(e) => { e.stopPropagation(); onNext(); }}>
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg>
+                    </button>
+                )}
             </Document>
 
             {!loading && numPages && (

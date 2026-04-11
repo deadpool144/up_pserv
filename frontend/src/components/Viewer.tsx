@@ -2,6 +2,7 @@ import React from 'react';
 import VideoPlayer from './VideoPlayer';
 import AudioPlayer from './AudioPlayer';
 import PdfViewer from './PdfViewer';
+import ImageViewer from './ImageViewer';
 
 
 interface ViewerProps {
@@ -27,7 +28,6 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
 
     const viewerRef = React.useRef<HTMLDivElement>(null);
     const [isIdle, setIsIdle] = React.useState(false);
-    const [imgError, setImgError] = React.useState(false);
     const idleTimerRef = React.useRef<any>(null);
 
     const resetIdleTimer = () => {
@@ -85,31 +85,21 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
             {/* Content area */}
             <div className={`viewer-content ${isPDF ? 'full-screen-doc' : ''}`}>
                 {isImage ? (
-                    imgError ? (
-                        <div className="viewer-generic">
-                            <div className="generic-icon">🖼️</div>
-                            <div className="generic-name">{file.name}</div>
-                            <div className="generic-size">Image failed to load</div>
-                        </div>
-
-                    ) : (
-                        <img
-                            src={previewUrl}
-                            alt={file.name}
-                            className="viewer-img no-copy-no-save"
-                            onError={() => setImgError(true)}
-                            onClick={(e) => e.stopPropagation()}
-                            draggable={false}
-                            onContextMenu={(e) => e.preventDefault()}
-                        />
-
-                    )
+                    <ImageViewer 
+                        fileId={file.id} 
+                        fileName={file.name} 
+                        token={token} 
+                        onNext={onNext}
+                        onPrev={onPrev}
+                    />
                 ) : isVideo ? (
                     <VideoPlayer
                         fileId={file.id}
                         token={token}
                         fileSize={file.size}
                         isIdle={isIdle}
+                        onNext={onNext}
+                        onPrev={onPrev}
                     />
                 ) : isAudio ? (
                     <AudioPlayer
@@ -124,20 +114,34 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                         fileUrl={previewUrl} 
                         fileName={file.name} 
                         isIdle={isIdle}
+                        onNext={onNext}
+                        onPrev={onPrev}
                     />
-
-
-
                 ) : file.type.includes('text') || file.name.endsWith('.txt') || file.name.endsWith('.log') ? (
-                    <div className="viewer-text-container">
+                    <div className="viewer-text-container" style={{ position: 'relative', width: '100%', height: '100%' }}>
+                        {onPrev && (
+                            <button className="nav-arrow prev-arrow" onClick={(e) => { e.stopPropagation(); onPrev(); }}>
+                                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
+                            </button>
+                        )}
                         <iframe
                             src={previewUrl}
                             className="viewer-text-frame"
                             title={file.name}
                         />
+                        {onNext && (
+                            <button className="nav-arrow next-arrow" onClick={(e) => { e.stopPropagation(); onNext(); }}>
+                                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg>
+                            </button>
+                        )}
                     </div>
                 ) : (
                     <div className="viewer-generic">
+                        {onPrev && (
+                            <button className="nav-arrow prev-arrow" onClick={(e) => { e.stopPropagation(); onPrev(); }}>
+                                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><polyline points="15 18 9 12 15 6" /></svg>
+                            </button>
+                        )}
                         <div className="generic-icon">📄</div>
                         <div className="generic-name">{file.name}</div>
                         <div className="generic-size">{(file.size / (1024 * 1024)).toFixed(2)} MB</div>
@@ -148,6 +152,11 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                         >
                             Download File
                         </a>
+                        {onNext && (
+                            <button className="nav-arrow next-arrow" onClick={(e) => { e.stopPropagation(); onNext(); }}>
+                                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><polyline points="9 18 15 12 9 6" /></svg>
+                            </button>
+                        )}
                     </div>
                 )}
             </div>
