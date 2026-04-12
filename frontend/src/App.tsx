@@ -65,6 +65,33 @@ const App: React.FC = () => {
         fetchPlaylists();
     }, [fetchFiles, fetchPlaylists]);
 
+    // Live Push: Automatically refresh gallery when background processing finishes
+    useEffect(() => {
+        if (!token) return;
+
+        const es = new EventSource(`/api/events?token=${token}`);
+        
+        es.onmessage = (e) => {
+            try {
+                const data = JSON.parse(e.data);
+                if (data.type === 'file_ready') {
+                    console.log('[SSE] File ready signal received:', data.id);
+                    fetchFiles();
+                }
+            } catch (err) {
+                console.error('[SSE] Event parse error:', err);
+            }
+        };
+
+        es.onerror = (err) => {
+            console.warn('[SSE] EventSource encountered an error, likely a temporary reconnect or auth issue.');
+            // Most browsers auto-reconnect SSE, but we close to be safe on auth fail
+            if (token === null) es.close();
+        };
+
+        return () => es.close();
+    }, [token, fetchFiles]);
+
     const handleCreatePlaylist = async (name: string) => {
         try {
             const response = await fetch(`/api/playlists?token=${token}`, {

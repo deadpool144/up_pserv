@@ -107,182 +107,182 @@ class BackgroundQueue {
         while (this.queue.length > 0 && this.activeJobs < this.maxConcurrency) {
             const task = this.queue.shift()!;
             this.activeJobs++;
-            this._runTask(task).finally(() => {
+            processVideoTask(task).finally(() => {
                 this.activeJobs--;
                 this._drain();
             });
         }
     }
+}
 
-    private async _runTask(task: RepairTask) {
-        const jobStart = Date.now();
-        let rawTmp: string | null = null;
-        let normTmp: string | null = null;
+export async function processVideoTask(task: RepairTask) {
+    const jobStart = Date.now();
+    let rawTmp: string | null = null;
+    let normTmp: string | null = null;
 
-        // ── Job header ────────────────────────────────────────────────────────
+    // ── Job header ────────────────────────────────────────────────────────
+    console.log('');
+    try {
+        const caps = getHWCaps();
+        console.log(`┌─ [Video] Processing: "${task.originalName}"`);
+        console.log(`│   ├─ Encoder  : ${caps.encoder.toUpperCase()}`);
+        console.log(`│   ├─ Capacity : ${caps.concurrency} concurrent`);
+        
+        const meta    = await getMeta(task.folder);
+        const dp      = vaultDataPath(task.folder);
+        const nonce   = Buffer.from(meta.nonce, 'base64');
+        const srcSize = (await fs.stat(dp)).size;
+
+        console.log(`│   ├─ File     : ${fmtBytes(srcSize)}`);
+        console.log(`│   ├─ ID       : ${task.id}`);
+        console.log('│');
+
+        const startTime = Date.now();
+
+        let decryptKey: Buffer | null = null;
+        if (meta.encLevel && meta.encLevel > 0) {
+            if (!task.encryptionKey) throw new Error('Missing decryption key for encrypted video');
+            decryptKey = Buffer.from(task.encryptionKey, 'hex');
+        } else if (meta.isEncrypted) {
+            // backward compat
+            if (!task.encryptionKey) throw new Error('Missing decryption key for encrypted video');
+            decryptKey = Buffer.from(task.encryptionKey, 'hex');
+        }
+
+        rawTmp  = path.join(TMP_DIR, `${task.id}_raw.mp4`);
+        normTmp = path.join(TMP_DIR, `${task.id}_norm.mp4`);
+
+
+        // ── Step 1: Decrypt ───────────────────────────────────────────────
+        const endDecrypt = stepTimer('Step 1/6  Decrypt to temp');
+        if (decryptKey) {
+            const decipher = getDecipherAtOffset(decryptKey, nonce, 0);
+            await pipeline(fs.createReadStream(dp), decipher, fs.createWriteStream(rawTmp));
+        } else {
+            await fs.copy(dp, rawTmp);
+        }
+        endDecrypt();
+
+        const rawStats = await fs.stat(rawTmp);
+        if (rawStats.size < 100_000) throw new Error('Raw file too small (corrupt or incomplete)');
+
+        // ── Step 2: Extract Subtitles (From Source) ───────────────────────
+        const endSubs = stepTimer('Step 2/6  Extract subtitles');
+        try {
+            // We extract from the raw source file BEFORE it is normalized/stripped
+            const tracks = await getSubtitleTracks(rawTmp);
+            if (tracks.length > 0) {
+                const subInfo = [];
+                for (let i = 0; i < tracks.length; i++) {
+                    const track = tracks[i];
+                    const subFileName = `sub_${i}.vtt`;
+                    const subPath = path.join(task.folder, subFileName);
+                    try {
+                        await extractSubtitle(rawTmp, track.index, subPath);
+                        subInfo.push({ index: i, label: track.label, lang: track.lang });
+                    } catch (indieErr) {
+                        console.warn(`  │   [Subs] Track ${i} extraction failed, skipping: ${indieErr}`);
+                    }
+                }
+                meta.subtitles = subInfo;
+                await saveMeta(task.folder, meta);
+                console.log(`  │   └─ Extracted ${subInfo.length} track(s)`);
+            }
+        } catch (subErr: any) {
+            console.warn(`  │   [Subs] Extraction failed: ${subErr.message}`);
+        }
+        endSubs();
+
+        // ── Step 3: Normalize / transcode ─────────────────────────────────
+        const isMKV = task.originalName.toLowerCase().endsWith('.mkv');
+        const method = isMKV ? caps.encoder.toUpperCase() : 'Remux (Copy)';
+        const modeLabel = isMKV ? `Full transcode (MKV→MP4) [Method: ${method}]` : 'Remux (copy + faststart) [Method: Instant]';
+        console.log(`  ├─ Step 3/6  ${modeLabel}`);
+
+
+        const normStart = Date.now();
+        await normalizeVideo(rawTmp, normTmp, isMKV);
+        const normMs    = Date.now() - normStart;
+        const normStats = await fs.stat(normTmp);
+        
+        if (normStats.size < 100_000) throw new Error('Normalized output too small (corrupt)');
+        console.log(`  │   └─ Step complete (${fmtMs(normMs)})  ${fmtBytes(rawStats.size)} → ${fmtBytes(normStats.size)}`);
+
+
+        // ── Step 3: Probe duration ────────────────────────────────────────
+        const endProbe = stepTimer('Step 3/5  Probe duration');
+        const { duration, fps, timescale } = await getVideoMetadata(normTmp);
+        endProbe();
+        if (!duration || duration <= 0) throw new Error('Invalid duration after normalization');
+        console.log(`  │   └─ ${fmtDur(duration)}  (FPS: ${fps.toFixed(2)}, Timescale: ${timescale})`);
+
+        // ── Step 4: Re-encrypt back to vault ──────────────────────────────
+        const endEnc  = stepTimer('Step 4/5  Re-encrypt to vault');
+        const newNonce = crypto.randomBytes(16);
+        if (decryptKey) {
+            const encryptor = getCipherAtOffset(decryptKey, newNonce, 0);
+            await pipeline(fs.createReadStream(normTmp), encryptor, fs.createWriteStream(dp));
+        } else {
+            await fs.copy(normTmp, dp);
+        }
+        endEnc();
+
+        // ── Step 5: Update meta + rebuild HLS index ───────────────────────
+        const endIdx  = stepTimer('Step 5/6  Rebuild HLS index');
+        const outSize = (await fs.stat(dp)).size;
+        meta.nonce    = newNonce.toString('base64');
+        meta.size     = outSize;
+        meta.duration = duration;
+        meta.fps      = fps;
+        meta.timescale = timescale;
+        meta.status   = 'ready';
+        meta.type     = 'video/mp4';
+        await saveMeta(task.folder, meta);
+
+        const fragments = await indexMoofOffsets(dp, newNonce, decryptKey);
+
+        await fs.writeJson(path.join(task.folder, 'hls_index.json'), fragments);
+        evictHLSCache(task.id);
+        endIdx();
+        console.log(`  │   └─ ${fragments.length} segments`);
+
+        // Broadcast to SSE clients
+        const { eventManager } = await import('./events.js');
+        eventManager.emit('file_ready', { id: task.id, status: 'ready' });
+
+        // ── Completion summary ────────────────────────────────────────────
+        const totalMs = Date.now() - jobStart;
+        console.log('│');
+        console.log(`└─ ✅  COMPLETE  "${task.originalName}"`);
+        console.log(`   ├─ Video    : ${fmtDur(duration)}`);
+        console.log(`   ├─ Output   : ${fmtBytes(outSize)}`);
+        console.log(`   ├─ Segments : ${fragments.length}`);
+        console.log(`   └─ Time     : ${fmtMs(totalMs)}`);
+        console.log('');
+
+    } catch (err: any) {
+        const totalMs = Date.now() - jobStart;
+        console.log('│');
+        console.log(`└─ ❌  FAILED  "${task.originalName}"  (after ${fmtMs(totalMs)})`);
+        
+        const isGPU = err.message.toLowerCase().includes('gpu') || 
+                      err.message.toLowerCase().includes('device') ||
+                      err.message.toLowerCase().includes('encoder');
+
+        if (isGPU) {
+            console.log(`   └─ ⚠️  Hardware acceleration failed.`);
+        }
+        console.log(`   └─ ${err.message}`);
         console.log('');
         try {
-            const caps = getHWCaps();
-            console.log(`┌─ [Video] Processing: "${task.originalName}"`);
-            console.log(`│   ├─ Encoder  : ${caps.encoder.toUpperCase()}`);
-            console.log(`│   ├─ Capacity : ${caps.concurrency} concurrent`);
-            
-            const meta    = await getMeta(task.folder);
-            const dp      = vaultDataPath(task.folder);
-            const nonce   = Buffer.from(meta.nonce, 'base64');
-            const srcSize = (await fs.stat(dp)).size;
-
-            console.log(`│   ├─ File     : ${fmtBytes(srcSize)}`);
-            console.log(`│   ├─ ID       : ${task.id}`);
-            console.log(`│   └─ Slot     : ${this.activeJobs}/${this.maxConcurrency}`);
-            console.log('│');
-
-            const startTime = Date.now();
-
-            let decryptKey: Buffer | null = null;
-            if (meta.encLevel && meta.encLevel > 0) {
-                if (!task.encryptionKey) throw new Error('Missing decryption key for encrypted video');
-                decryptKey = Buffer.from(task.encryptionKey, 'hex');
-            } else if (meta.isEncrypted) {
-                // backward compat
-                if (!task.encryptionKey) throw new Error('Missing decryption key for encrypted video');
-                decryptKey = Buffer.from(task.encryptionKey, 'hex');
-            }
-
-            rawTmp  = path.join(TMP_DIR, `${task.id}_raw.mp4`);
-            normTmp = path.join(TMP_DIR, `${task.id}_norm.mp4`);
-
-
-            // ── Step 1: Decrypt ───────────────────────────────────────────────
-            const endDecrypt = stepTimer('Step 1/6  Decrypt to temp');
-            if (decryptKey) {
-                const decipher = getDecipherAtOffset(decryptKey, nonce, 0);
-                await pipeline(fs.createReadStream(dp), decipher, fs.createWriteStream(rawTmp));
-            } else {
-                await fs.copy(dp, rawTmp);
-            }
-            endDecrypt();
-
-            const rawStats = await fs.stat(rawTmp);
-            if (rawStats.size < 100_000) throw new Error('Raw file too small (corrupt or incomplete)');
-
-            // ── Step 2: Extract Subtitles (From Source) ───────────────────────
-            const endSubs = stepTimer('Step 2/6  Extract subtitles');
-            try {
-                // We extract from the raw source file BEFORE it is normalized/stripped
-                const tracks = await getSubtitleTracks(rawTmp);
-                if (tracks.length > 0) {
-                    const subInfo = [];
-                    for (let i = 0; i < tracks.length; i++) {
-                        const track = tracks[i];
-                        const subFileName = `sub_${i}.vtt`;
-                        const subPath = path.join(task.folder, subFileName);
-                        try {
-                            await extractSubtitle(rawTmp, track.index, subPath);
-                            subInfo.push({ index: i, label: track.label, lang: track.lang });
-                        } catch (indieErr) {
-                            console.warn(`  │   [Subs] Track ${i} extraction failed, skipping: ${indieErr}`);
-                        }
-                    }
-                    meta.subtitles = subInfo;
-                    await saveMeta(task.folder, meta);
-                    console.log(`  │   └─ Extracted ${subInfo.length} track(s)`);
-                }
-            } catch (subErr: any) {
-                console.warn(`  │   [Subs] Extraction failed: ${subErr.message}`);
-            }
-            endSubs();
-
-            // ── Step 3: Normalize / transcode ─────────────────────────────────
-            const isMKV = task.originalName.toLowerCase().endsWith('.mkv');
-            const method = isMKV ? caps.encoder.toUpperCase() : 'Remux (Copy)';
-            const modeLabel = isMKV ? `Full transcode (MKV→MP4) [Method: ${method}]` : 'Remux (copy + faststart) [Method: Instant]';
-            console.log(`  ├─ Step 3/6  ${modeLabel}`);
-
-
-            const normStart = Date.now();
-            await normalizeVideo(rawTmp, normTmp, isMKV);
-            const normMs    = Date.now() - normStart;
-            const normStats = await fs.stat(normTmp);
-            
-            if (normStats.size < 100_000) throw new Error('Normalized output too small (corrupt)');
-            console.log(`  │   └─ Step complete (${fmtMs(normMs)})  ${fmtBytes(rawStats.size)} → ${fmtBytes(normStats.size)}`);
-
-
-            // ── Step 3: Probe duration ────────────────────────────────────────
-            const endProbe = stepTimer('Step 3/5  Probe duration');
-            const { duration, fps, timescale } = await getVideoMetadata(normTmp);
-            endProbe();
-            if (!duration || duration <= 0) throw new Error('Invalid duration after normalization');
-            console.log(`  │   └─ ${fmtDur(duration)}  (FPS: ${fps.toFixed(2)}, Timescale: ${timescale})`);
-
-            // ── Step 4: Re-encrypt back to vault ──────────────────────────────
-            const endEnc  = stepTimer('Step 4/5  Re-encrypt to vault');
-            const newNonce = crypto.randomBytes(16);
-            if (decryptKey) {
-                const encryptor = getCipherAtOffset(decryptKey, newNonce, 0);
-                await pipeline(fs.createReadStream(normTmp), encryptor, fs.createWriteStream(dp));
-            } else {
-                await fs.copy(normTmp, dp);
-            }
-            endEnc();
-
-            // ── Step 5: Update meta + rebuild HLS index ───────────────────────
-            const endIdx  = stepTimer('Step 5/6  Rebuild HLS index');
-            const outSize = (await fs.stat(dp)).size;
-            meta.nonce    = newNonce.toString('base64');
-            meta.size     = outSize;
-            meta.duration = duration;
-            meta.fps      = fps;
-            meta.timescale = timescale;
-            meta.status   = 'ready';
-            meta.type     = 'video/mp4';
+            const meta  = await getMeta(task.folder);
+            meta.status = 'error';
             await saveMeta(task.folder, meta);
+        } catch { /* best effort */ }
 
-            const fragments = await indexMoofOffsets(dp, newNonce, decryptKey);
-
-            await fs.writeJson(path.join(task.folder, 'hls_index.json'), fragments);
-            evictHLSCache(task.id);
-            endIdx();
-            console.log(`  │   └─ ${fragments.length} segments`);
-
-            // (Subtitle extraction removed from here, moved to Step 2)
-
-            // ── Completion summary ────────────────────────────────────────────
-            // ── Completion summary ────────────────────────────────────────────
-            const totalMs = Date.now() - jobStart;
-            console.log('│');
-            console.log(`└─ ✅  COMPLETE  "${task.originalName}"`);
-            console.log(`   ├─ Video    : ${fmtDur(duration)}`);
-            console.log(`   ├─ Output   : ${fmtBytes(outSize)}`);
-            console.log(`   ├─ Segments : ${fragments.length}`);
-            console.log(`   └─ Time     : ${fmtMs(totalMs)}`);
-            console.log('');
-
-        } catch (err: any) {
-            const totalMs = Date.now() - jobStart;
-            console.log('│');
-            console.log(`└─ ❌  FAILED  "${task.originalName}"  (after ${fmtMs(totalMs)})`);
-            
-            const isGPU = err.message.toLowerCase().includes('gpu') || 
-                          err.message.toLowerCase().includes('device') ||
-                          err.message.toLowerCase().includes('encoder');
-
-            if (isGPU) {
-                console.log(`   └─ ⚠️  Hardware acceleration failed. Falling back to CPU for future jobs.`);
-            }
-            console.log(`   └─ ${err.message}`);
-            console.log('');
-            try {
-                const meta  = await getMeta(task.folder);
-                meta.status = 'error';
-                await saveMeta(task.folder, meta);
-            } catch { /* best effort */ }
-
-        } finally {
-            if (rawTmp  && await fs.pathExists(rawTmp))  await fs.remove(rawTmp);
-            if (normTmp && await fs.pathExists(normTmp)) await fs.remove(normTmp);
-        }
+    } finally {
+        if (rawTmp  && await fs.pathExists(rawTmp))  await fs.remove(rawTmp);
+        if (normTmp && await fs.pathExists(normTmp)) await fs.remove(normTmp);
     }
 }
 

@@ -709,7 +709,7 @@ router.post('/upload-chunk', tokenRequired, async (req: Request, res: Response) 
 
         await finalizeVaultItem(tempDir, filename, nonce, totalSize, encLevel, shouldRandomize, encKey, res.locals.userKeyId, fps, timescale);
         
-        // Trigger background processing for videos
+        // Background processing for videos (Restored for instant upload response)
         if ((mime.lookup(filename) || "").toString().startsWith("video/")) {
             repairQueue.add({
                 id: fileId,
@@ -721,10 +721,27 @@ router.post('/upload-chunk', tokenRequired, async (req: Request, res: Response) 
 
         _uploadInitLocks.delete(fileId);
         console.log(`[Upload] ✅ Done: ${filename} (encLevel=${encLevel})`);
-
     }
 
     res.send("OK");
+});
+
+/**
+ * GET /api/events
+ * Real-time event stream (SSE)
+ */
+router.get('/events', async (req, res) => {
+    const { token } = req.query;
+    if (!token) return res.status(401).send("Unauthorized");
+    
+    // Add client to SSE manager
+    const { eventManager } = await import('./events.js');
+    const clientId = eventManager.addClient(res);
+
+    // Cleanup on disconnect
+    req.on('close', () => {
+        eventManager.removeClient(clientId);
+    });
 });
 
 
