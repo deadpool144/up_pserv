@@ -15,7 +15,12 @@ import {
 
 import {
     generateThumbnail,
-    normalizeVideo
+    generateSafeThumbnail,
+    getVideoMetadata,
+    normalizeVideo,
+    getSubtitleTracks,
+    extractSubtitle,
+    STREAM_HWM
 } from './media.js';
 
 const KEY_BUFFER = getAesKey(ACCESS_KEY);
@@ -216,14 +221,6 @@ export async function indexMoofOffsets(dp: string, nonce: Buffer, decryptKey: Bu
     return fragments;
 }
 
-async function generateSafeThumbnail(dp: string, nonce: Buffer, mimeType: string, id: string, key: Buffer | null) {
-    const decipher = key ? getDecipherAtOffset(key, nonce, 0) : null;
-    const source = fs.createReadStream(dp);
-    const stream = new PassThrough();
-    if (decipher) pipeline(source, decipher, stream).catch(() => {});
-    else pipeline(source, stream).catch(() => {});
-    await generateThumbnail(stream as any, id, mimeType);
-}
 
 export async function finalizeVaultItem(
     tempDir: string,
@@ -248,6 +245,19 @@ export async function finalizeVaultItem(
 
     try {
         await fs.ensureDir(path.dirname(finalDir));
+
+        const dp = vaultDataPath(finalDir);
+        const tempFilePath = path.join(tempDir, originalName);
+        
+        let thumbSuccess = false;
+        try {
+            await generateThumbnail(tempFilePath, enc_name, mimeType, encKey);
+            thumbSuccess = true;
+        } catch (thumbErr) {
+            console.warn("[Media] Initial thumbnail failed, will retry from vault...", (thumbErr as any)?.message || thumbErr);
+            thumbSuccess = false;
+        }
+
         const meta: FileMeta = {
             id: enc_name,
             name: originalName,
@@ -258,6 +268,7 @@ export async function finalizeVaultItem(
             created_at: Date.now() / 1000,
             duration: 0,
             status: mimeType.startsWith("video/") ? "processing" : "ready",
+            thumb: thumbSuccess,
             encLevel,
             isEncrypted: encLevel > 0,
             userKeyId: userKeyId || undefined,
@@ -279,14 +290,18 @@ export async function finalizeVaultItem(
             }
         }
         if (!moved) throw new Error(`Could not move ${tempDir} → ${finalDir}`);
-        try {
-            const dp = vaultDataPath(finalDir);
-            await generateSafeThumbnail(dp, nonce, mimeType, enc_name, encKey);
-            const updatedMeta = await getMeta(finalDir);
-            updatedMeta.thumb = true;
-            await saveMeta(finalDir, updatedMeta);
-        } catch (thumbErr) {
-            console.warn("[Storage] Non-fatal thumbnail error for", enc_name, thumbErr);
+
+        // Fallback: If thumbnail failed from temp, try once more from vault
+        if (!thumbSuccess) {
+            try {
+                const finalDp = vaultDataPath(finalDir);
+                await generateSafeThumbnail(finalDp, nonce, mimeType, enc_name, encKey);
+                const updatedMeta = await getMeta(finalDir);
+                updatedMeta.thumb = true;
+                await saveMeta(finalDir, updatedMeta);
+            } catch (fErr) {
+                console.warn("[Storage] Final thumbnail fallback failed", fErr);
+            }
         }
     } catch (err) {
         console.error("[Storage] Finalization fatal error, scrubbing temp:", err);

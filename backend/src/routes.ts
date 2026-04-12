@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import type { Request, Response, NextFunction } from 'express';
-import { ACCESS_KEY, SECRET_KEY, TOKEN_TTL, THUMBNAIL_DIR, VAULT_DIR, TMP_DIR } from './config.js';
+import { ACCESS_KEY, SECRET_KEY, TOKEN_TTL, THUMBNAIL_DIR, VAULT_DIR, TMP_DIR, KEY_BUFFER, LEGACY_KEY_BUFFER } from './config.js';
 import { getDetailedListing, findItemPath, getMeta, vaultDataPath, writeToVault, finalizeVaultItem, isVaultItem, saveMeta, indexMoofOffsets, FragmentIndex } from './storage.js';
 import { generateThumbnail, getVideoMetadata, normalizeVideo, getSubtitleTracks, extractSubtitle, STREAM_HWM } from './media.js';
 import { getAesKey, getCipherAtOffset, resolveDecryptKey, getUserKeyId } from './crypto.js';
@@ -33,7 +33,6 @@ async function getHLSIndex(id: string, indexPath: string, fileSize: number): Pro
 }
 
 export { evictHLSCache };  // re-export for convenience (admin reindex route)
-const KEY_BUFFER = getAesKey(ACCESS_KEY);
 
 // ── Token store ───────────────────────────────────────────────────────────────
 const tokens: Map<string, { expires: number, userKey: string, userKeyId?: string }> = new Map();
@@ -233,6 +232,24 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
 
         res.setHeader("Accept-Ranges", "bytes");
 
+        // ── Key resolution (encLevel system) ───────────────────────────────
+        const userKey: string = res.locals.userKey || '';
+        const eLvl = meta.encLevel ?? (meta.isEncrypted === false ? 0 : 1);
+
+        // Block access to level-2 files if session has no personal key OR the wrong key
+        if (eLvl === 2) {
+            if (userKey.length === 0) {
+                if (!res.headersSent) res.status(403).json({ error: "Personal key required", encLevel: 2 });
+                return;
+            }
+            if (meta.userKeyId && meta.userKeyId !== res.locals.userKeyId) {
+                if (!res.headersSent) res.status(403).json({ error: "Access denied: This file belongs to another key" });
+                return;
+            }
+        }
+
+        const decryptKey = resolveDecryptKey(meta.encLevel, meta.isEncrypted, KEY_BUFFER, SECRET_KEY, userKey);
+
         const isVideo = meta.type.startsWith('video/') || meta.original.toLowerCase().endsWith('.mkv');
         const needsTranscode = (meta.status !== "ready" && meta.original.toLowerCase().endsWith('.mkv')) || req.query.transcode === 'true';
 
@@ -241,7 +258,6 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
         if (isVideo && needsTranscode) {
             console.log(`[Stream] Dynamic QSV Transcode for ${meta.original}`);
 
-            // For live transcoding, we send 200 OK and chunked delivery
             res.status(200);
             res.setHeader("Content-Type", "video/mp4");
             res.setHeader("Cache-Control", "no-cache");
@@ -259,9 +275,7 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
                 if (req.query.t) {
                     seekTime = parseFloat(req.query.t as string);
                 } else if (range && totalSize > 0 && (meta.duration || 0) > 0) {
-                    // 🔥 AUTO-SEEK: Convert byte range to estimated seconds
                     seekTime = (start / totalSize) * (meta.duration || 0);
-                    console.log(`[Stream] Auto-derived seek: ${seekTime.toFixed(2)}s from byte ${start}`);
                 }
 
                 if (seekTime > 0) {
@@ -269,26 +283,22 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
                     if (await fs.pathExists(indexPath)) {
                         const offsets: number[] = await fs.readJson(indexPath);
                         const duration = meta.duration || 0;
-                        
                         if (duration > 0 && offsets.length > 0) {
                             const segmentDuration = duration / offsets.length;
                             const segmentIndex = Math.floor(seekTime / segmentDuration);
                             const safeIndex = Math.min(offsets.length - 1, Math.max(0, segmentIndex));
-                            
                             startByte = offsets[safeIndex];
                             inputOptions.push('-ss', seekTime.toFixed(2));
-                            console.log(`[Stream] Refined seeking to ${seekTime.toFixed(2)}s (Byte: ${startByte})`);
                         }
                     }
                 }
             }
 
             const ffmpeg = spawnStreamProcessor(req, true, inputOptions);
-
             const readStream = fs.createReadStream(dp, { start: startByte, highWaterMark: STREAM_HWM });
-            const decryptor = getCipherAtOffset(KEY_BUFFER, nonce, startByte);
+            // FIXED: Use resolved decryptKey
+            const decryptor = getCipherAtOffset(decryptKey || KEY_BUFFER, nonce, startByte);
 
-            // Sniffer to verify decryption
             let snifferBuffer = Buffer.alloc(0);
             const sniffer = new (await import('stream')).Transform({
                 transform(chunk, encoding, callback) {
@@ -304,44 +314,20 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
 
             ffmpeg.stderr?.on('data', (d) => {
                 const msg = d.toString();
-                if (msg.includes('error') || msg.includes('Error')) {
-                    console.error("[FFmpeg-Live]", msg);
-                }
+                if (msg.includes('error') || msg.includes('Error')) console.error("[FFmpeg-Live]", msg);
             });
-
-            // Input hint is now handled by spawnStreamProcessor(true, inputOptions)
 
             readStream.pipe(decryptor).pipe(sniffer).pipe(ffmpeg.stdin);
             ffmpeg.stdout.pipe(res);
             return;
         }
 
-        // Standard direct pipe (H.264 compatible)
-        // Ensure we send the 206 status code for seeking
+        // Standard direct pipe
         res.status(statusCode);
         Object.entries(headers).forEach(([k, v]: [string, any]) => res.setHeader(k, v));
         if (statusCode === 206) {
             res.setHeader("Content-Range", `bytes ${start}-${end}/${totalSize}`);
         }
-
-        // ── Key resolution (encLevel system) ───────────────────────────────
-        const userKey: string = res.locals.userKey || '';
-        const eLvl = meta.encLevel ?? (meta.isEncrypted === false ? 0 : 1);
-
-        // Block access to level-2 files if session has no personal key OR the wrong key
-        if (eLvl === 2) {
-            if (userKey.length === 0) {
-                if (!res.headersSent) res.status(403).json({ error: "Personal key required", encLevel: 2 });
-                return;
-            }
-            // Isolation check (for tagged files)
-            if (meta.userKeyId && meta.userKeyId !== res.locals.userKeyId) {
-                if (!res.headersSent) res.status(403).json({ error: "Access denied: This file belongs to another key" });
-                return;
-            }
-        }
-
-        const decryptKey = resolveDecryptKey(meta.encLevel, meta.isEncrypted, KEY_BUFFER, SECRET_KEY, userKey);
 
         const readStream = fs.createReadStream(dp, { start, end, highWaterMark: STREAM_HWM });
 
@@ -556,27 +542,70 @@ router.get('/thumbnail/:id', tokenRequired, async (req: Request, res: Response) 
             return res.status(404).send("Not found");
         }
 
-        res.writeHead(200, { "Content-Type": "image/jpeg" });
+        const decryptKey = resolveDecryptKey(eLvl, true, KEY_BUFFER, SECRET_KEY, userKey);
+
+        res.setHeader('Content-Type', 'image/jpeg');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
 
         const readStream = fs.createReadStream(thPath);
-        let headerHandled = false;
         let decryptor: any = null;
+        let headerBuffer = Buffer.alloc(0);
+        let isLegacy = false;
+
+        // Level 0 Bypass: If unencrypted, serve raw file directly
+        if (eLvl === 0) {
+            readStream.pipe(res);
+            return;
+        }
 
         readStream.on('data', (chunk: Buffer) => {
-            let data = chunk;
-            if (!headerHandled) {
-                const nonce = data.slice(0, 16);
-                data = data.slice(16);
-                decryptor = getCipherAtOffset(KEY_BUFFER, nonce, 0);
-                headerHandled = true;
-            }
-            if (data.length > 0) {
-                res.write(decryptor.update(data));
+            // 1. Accumulate until we have enough to sniff (16 header + at least 2 data)
+            if (!decryptor) {
+                headerBuffer = Buffer.concat([headerBuffer, chunk]);
+                if (headerBuffer.length >= 18) {
+                    const nonce = headerBuffer.slice(0, 16);
+                    const remainder = headerBuffer.slice(16);
+
+                    // Try current key (SECRET_KEY based)
+                    const currentKey = decryptKey || KEY_BUFFER;
+                    let tempDecryptor = getCipherAtOffset(currentKey, nonce, 0);
+                    
+                    const sniff = tempDecryptor.update(remainder.slice(0, 2));
+                    if (sniff[0] !== 0xFF || sniff[1] !== 0xD8) {
+                        // Mismatch! If it's a Level 1 file, try Legacy Key (ACCESS_KEY based)
+                        if (eLvl === 1) {
+                            isLegacy = true;
+                        }
+                    }
+
+                    // 2. Initialize the final decryptor at offset 0 
+                    // and write the FULL remainder (which starts at byte 0 of encrypted data)
+                    decryptor = getCipherAtOffset(isLegacy ? LEGACY_KEY_BUFFER : currentKey, nonce, 0);
+                    res.write(decryptor.update(remainder));
+                }
+            } else {
+                // 3. Normal stream processing
+                res.write(decryptor.update(chunk));
             }
         });
 
         readStream.on('end', () => {
+            if (decryptor) decryptor.final();
+            // Handle edge case: very tiny file or exactly 16-17 bytes (never initialized decryptor)
+            if (!decryptor && headerBuffer.length >= 16) {
+                 const nonce = headerBuffer.slice(0, 16);
+                 const remainder = headerBuffer.slice(16);
+                 const currentKey = decryptKey || KEY_BUFFER;
+                 const finalDec = getCipherAtOffset(currentKey, nonce, 0);
+                 res.write(finalDec.update(remainder));
+                 finalDec.final();
+            }
             res.end();
+        });
+
+        readStream.on('error', (err) => {
+            console.error("[Thumbnail] Stream error:", err);
+            if (!res.headersSent) res.status(500).send("Stream error");
         });
     } catch (err) {
         console.error("[Thumbnail] Error:", err);

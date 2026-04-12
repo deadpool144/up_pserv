@@ -19,7 +19,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import crypto from 'crypto';
 import { getAesKey, getCipherAtOffset } from './crypto.js';
-import { ACCESS_KEY, THUMBNAIL_DIR, CPU_THREADS } from './config.js';
+import { ACCESS_KEY, THUMBNAIL_DIR, CPU_THREADS, KEY_BUFFER } from './config.js';
 import { getHWCaps } from './hwdetect.js';
 
 const ffBin = (typeof ffmpegPath === 'string' ? ffmpegPath : (ffmpegPath as any)?.path) as string;
@@ -32,7 +32,6 @@ if (ffprobeStatic) {
     if (p) ffmpeg.setFfprobePath(p);
 }
 
-const KEY_BUFFER = getAesKey(ACCESS_KEY);
 
 // ── Read-stream tuning ────────────────────────────────────────────────────────
 // 256KB chunks are more efficient on HDDs than the default 64KB
@@ -220,7 +219,7 @@ function buildCPUArgs(inputPath: string, outputPath: string, threads: number): s
 // PUBLIC API
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function generateThumbnail(filePath: string | Readable, id: string, type: string) {
+export async function generateThumbnail(filePath: string | Readable, id: string, type: string, encKey: Buffer | null = null) {
     const outPath = path.join(THUMBNAIL_DIR, id);
     await fs.ensureDir(THUMBNAIL_DIR);
 
@@ -296,12 +295,29 @@ export async function generateThumbnail(filePath: string | Readable, id: string,
             return;
         }
 
-        const nonce = crypto.randomBytes(16);
-        const cipher = getCipherAtOffset(KEY_BUFFER, nonce, 0);
-        const encrypted = Buffer.concat([cipher.update(thumbBuffer!), cipher.final()]);
-        await fs.writeFile(outPath, Buffer.concat([nonce, encrypted]));
+        if (!encKey) {
+            // Level 0: Write standard plaintext JPEG
+            await fs.writeFile(outPath, thumbBuffer!);
+        } else {
+            // Level 1/2: Write encrypted packet (nonce + ciphertext)
+            const nonce = crypto.randomBytes(16);
+            const cipher = getCipherAtOffset(encKey, nonce, 0);
+            const encrypted = Buffer.concat([cipher.update(thumbBuffer!), cipher.final()]);
+            await fs.writeFile(outPath, Buffer.concat([nonce, encrypted]));
+        }
     } catch (err: any) {
-        console.error(`[Media] Thumbnail failed for ${id}:`, err?.message || err);
+        console.error(`[Media] Thumbnail generation failed for ${id}:`, err?.message || err);
+        throw err; // Re-throw so storage.ts can detect failure
+    } finally {
+        // Ensure all possible temp files are scrubbed
+        const mediaTmp = path.join(THUMBNAIL_DIR, `${id}_m.tmp`);
+        const imageTmp = path.join(THUMBNAIL_DIR, `${id}_tmp.jpg`);
+        try {
+            if (fs.existsSync(mediaTmp)) fs.removeSync(mediaTmp);
+            if (fs.existsSync(imageTmp)) fs.removeSync(imageTmp);
+        } catch (scErr) {
+            // Non-fatal cleanup error
+        }
     }
 }
 
@@ -631,3 +647,30 @@ export function spawnStreamProcessor(
 
 // Export the tuned read-stream HWM for use in routes
 export const STREAM_HWM = READ_HWM;
+
+/**
+ * Extracts a thumbnail from a file already in the vault.
+ * Useful for re-indexing or fallback after failed upload processing.
+ */
+export async function generateSafeThumbnail(
+    vaultPath: string,
+    nonce: string | Buffer,
+    mimeType: string,
+    id: string,
+    encKey: Buffer | null
+) {
+    const nonceBuf = typeof nonce === 'string' ? Buffer.from(nonce, 'base64') : nonce;
+    
+    // Create a read stream that handles decryption on-the-fly if needed
+    let readStream: Readable = fs.createReadStream(vaultPath);
+    
+    if (encKey) {
+        const { getDecipherAtOffset } = await import('./crypto.js');
+        const decipher = getDecipherAtOffset(encKey, nonceBuf, 0);
+        const transform = new PassThrough();
+        readStream.pipe(decipher).pipe(transform);
+        readStream = transform as any;
+    }
+
+    await generateThumbnail(readStream, id, mimeType, encKey);
+}

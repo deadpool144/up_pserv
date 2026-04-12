@@ -2,6 +2,7 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import os from 'os';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,8 +27,12 @@ export const FOLDERS = {
     temp: TMP_DIR
 };
 
-import crypto from 'crypto';
-export const KEY_BUFFER = crypto.createHash('sha256').update(ACCESS_KEY).digest();
+// The Master Vault Key is derived from the SECRET_KEY.
+// This decouples the LOGIN (ACCESS_KEY) from the ENCRYPTION (SECRET_KEY).
+export const KEY_BUFFER = crypto.createHash('sha256').update(SECRET_KEY).digest();
+
+/** Legacy key for thumbnails/files encrypted before the ACCESS_KEY -> SECRET_KEY split. */
+export const LEGACY_KEY_BUFFER = crypto.createHash('sha256').update(ACCESS_KEY).digest();
 
 // ── System tuning (auto-detected) ────────────────────────────────────────────
 const _cpuLogical = os.cpus().length; // Hyperthreading-aware (e.g. i3-2100 = 4)
