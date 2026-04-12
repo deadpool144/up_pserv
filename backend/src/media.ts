@@ -169,7 +169,7 @@ function buildNVENCArgs(inputPath: string, outputPath: string): string[] {
         '-b:v', '0',
         '-maxrate', '3M',
         '-bufsize', '6M',
-        '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+        '-c:a', 'aac', '-b:a', '320k', '-ac', '2',
         '-map', '0:v:0?', '-map', '0:a:0?', '-sn',
         '-pix_fmt', 'yuv420p',
         '-g', '48', '-keyint_min', '48', '-sc_threshold', '0',
@@ -190,7 +190,7 @@ function buildQSVArgs(inputPath: string, outputPath: string): string[] {
         '-global_quality', '22',
         '-look_ahead', '0',
         '-vf', 'vpp_qsv=format=nv12',    // Ensure hardware surface is NV12 (optimal for QSV enc)
-        '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+        '-c:a', 'aac', '-b:a', '320k', '-ac', '2',
         '-map', '0:v:0?', '-map', '0:a:0?', '-sn',
         '-g', '48', '-keyint_min', '48', '-sc_threshold', '0',
         '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart',
@@ -206,7 +206,7 @@ function buildCPUArgs(inputPath: string, outputPath: string, threads: number): s
         '-preset', 'ultrafast',         // Fastest encode; fine for local streaming
         '-crf', '24',
         '-tune', 'fastdecode',          // Optimise output for low-end client decoding
-        '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+        '-c:a', 'aac', '-b:a', '320k', '-ac', '2',
         '-map', '0:v:0?', '-map', '0:a:0?', '-sn',
         '-pix_fmt', 'yuv420p',
         '-g', '48', '-keyint_min', '48', '-sc_threshold', '0',
@@ -226,6 +226,10 @@ export async function generateThumbnail(filePath: string | Readable, id: string,
     let thumbBuffer: Buffer;
 
     try {
+        if (type.startsWith('audio/')) {
+            encKey = null; // Always plaintext for audio
+        }
+
         if (type.startsWith('image/')) {
             if (typeof filePath === 'string') {
                 thumbBuffer = await sharp(filePath)
@@ -258,14 +262,16 @@ export async function generateThumbnail(filePath: string | Readable, id: string,
                 const cmd = ffmpeg(ffmpegInput);
 
                 if (type.startsWith('audio/')) {
-                    cmd.output(tmpFile)
-                       .frames(1)
+                    // Extract album art: map video stream 0:v (the cover image)
+                    cmd.addOutputOption('-map', '0:v')
+                       .addOutputOption('-c:v', 'mjpeg')
+                       .addOutputOption('-frames:v', '1')
                        .on('end', () => resolve())
                        .on('error', (err) => {
                            console.warn(`[Media] Audio cover extraction failed for ${id}: ${err.message}`);
-                           resolve();
+                           reject(err); // Fail so storage.ts knows it has no cover
                        })
-                       .run();
+                       .save(tmpFile);
                 } else {
                     cmd.on('error', (err) => reject(err))
                        .on('end', () => resolve())
@@ -555,7 +561,7 @@ export function spawnStreamProcessor(
     ];
 
     const outputArgs = [
-        '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
+        '-c:a', 'aac', '-b:a', '320k', '-ac', '2',
         '-map', '0:v:0?', '-map', '0:a:0?',
         '-f', 'mp4',
         '-movflags', 'frag_keyframe+empty_moov+separate_moof+omit_tfhd_offset',
