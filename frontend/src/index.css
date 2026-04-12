@@ -1099,6 +1099,66 @@ button {
     transform: translateX(0);
 }
 
+/* Subtitle Button Specific Styles */
+.cc-btn-active {
+    background: var(--accent) !important;
+    color: white !important;
+}
+
+.sub-menu {
+    position: absolute;
+    bottom: 50px;
+    right: 0;
+    background: rgba(10, 10, 20, 0.95);
+    backdrop-filter: blur(20px);
+    border: 1px solid var(--border-h);
+    border-radius: 12px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    min-width: 140px;
+    z-index: 1000;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+    animation: slideUp 0.2s ease-out;
+}
+
+.sub-menu-header {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--text2);
+    padding: 4px 12px 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid var(--border-h);
+    margin-bottom: 4px;
+}
+
+.sub-item {
+    background: transparent;
+    border: none;
+    color: var(--text);
+    padding: 8px 12px;
+    text-align: left;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: 0.2s;
+}
+
+.sub-item:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.sub-item.active {
+    background: var(--accent);
+    color: white;
+}
+
+@keyframes slideUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
 .active-accent {
     color: var(--accent) !important;
     border-color: var(--border-h) !important;

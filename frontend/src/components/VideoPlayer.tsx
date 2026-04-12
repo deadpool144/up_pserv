@@ -9,9 +9,12 @@ interface VideoPlayerProps {
     isIdle?: boolean;
     onNext?: () => void;
     onPrev?: () => void;
+    subtitles?: { index: number, label: string, lang: string }[];
 }
 
-const VideoPlayer: React.FC<VideoPlayerProps> = ({ fileId, token, isIdle = false, onNext, onPrev }) => {
+const VideoPlayer: React.FC<VideoPlayerProps> = ({ 
+    fileId, token, isIdle = false, onNext, onPrev, subtitles 
+}) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const hlsRef = useRef<Hls | null>(null);
@@ -28,6 +31,10 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ fileId, token, isIdle = false
     const [hoverTime, setHoverTime] = useState<number | null>(null);
     const [hoverX, setHoverX] = useState(0);
 
+    // Subtitle state
+    const [showSubMenu, setShowSubMenu] = useState(false);
+    const [activeTrack, setActiveTrack] = useState<number | -1>(-1); // -1 = off
+
     const controlsTimeoutRef = useRef<any>(null);
 
     const hlsUrl = `/api/stream/${fileId}/v.m3u8?token=${token}`;
@@ -40,13 +47,12 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ fileId, token, isIdle = false
             const hls = new Hls({
                 debug: false,
                 enableWorker: true,
-                lowLatencyMode: false, // 🔥 Prioritize stability for mobile
+                lowLatencyMode: false,
                 backBufferLength: 90,
-                maxBufferLength: 180,  // 🔥 3 minute buffer
+                maxBufferLength: 180,
                 maxMaxBufferLength: 600,
-                maxBufferSize: 250 * 1000 * 1000, // 250MB cap
+                maxBufferSize: 250 * 1000 * 1000,
                 nudgeMaxRetry: 5,
-                // These help with fragmented MP4 streaming over poor connections
                 fragLoadingMaxRetry: 10,
                 manifestLoadingMaxRetry: 10,
                 levelLoadingMaxRetry: 10
@@ -85,7 +91,6 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ fileId, token, isIdle = false
             });
         } 
         else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            // Safari native HLS support
             video.src = hlsUrl;
             video.addEventListener('loadedmetadata', () => setIsLoading(false));
         }
@@ -210,7 +215,18 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ fileId, token, isIdle = false
                 autoPlay
                 controls={false}
                 playsInline
-            />
+            >
+                {subtitles?.map((s, i) => (
+                    <track
+                        key={i}
+                        kind="subtitles"
+                        label={s.label}
+                        srcLang={s.lang}
+                        src={`/api/subtitles/${fileId}/${s.index}?token=${token}`}
+                        default={i === 0}
+                    />
+                ))}
+            </video>
 
             <div className="player-ui">
                 {onPrev && (
@@ -316,6 +332,58 @@ const VideoPlayer: React.FC<VideoPlayerProps> = ({ fileId, token, isIdle = false
                                     }}
                                 />
                             </div>
+
+                            {/* CC Button */}
+                            {subtitles && subtitles.length > 0 && (
+                                <div className="cc-container" style={{ position: 'relative' }}>
+                                    <button 
+                                        className={`ctrl-btn ${activeTrack !== -1 ? 'cc-btn-active' : ''}`} 
+                                        onClick={() => setShowSubMenu(!showSubMenu)}
+                                        title="Subtitles"
+                                    >
+                                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                            <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                                            <path d="M7 15h2m2 0h2m-6 3h2m2 0h2m-6-11V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                        </svg>
+                                    </button>
+                                    {showSubMenu && (
+                                        <div className="sub-menu">
+                                            <div className="sub-menu-header">Subtitles</div>
+                                            <button 
+                                                className={`sub-item ${activeTrack === -1 ? 'active' : ''}`}
+                                                onClick={() => {
+                                                    setActiveTrack(-1);
+                                                    if (videoRef.current) {
+                                                        for (let i = 0; i < videoRef.current.textTracks.length; i++) {
+                                                            videoRef.current.textTracks[i].mode = 'hidden';
+                                                        }
+                                                    }
+                                                    setShowSubMenu(false);
+                                                }}
+                                            >
+                                                Off
+                                            </button>
+                                            {subtitles.map((s, i) => (
+                                                <button 
+                                                    key={i}
+                                                    className={`sub-item ${activeTrack === i ? 'active' : ''}`}
+                                                    onClick={() => {
+                                                        setActiveTrack(i);
+                                                        if (videoRef.current) {
+                                                            for (let j = 0; j < videoRef.current.textTracks.length; j++) {
+                                                                videoRef.current.textTracks[j].mode = j === i ? 'showing' : 'hidden';
+                                                            }
+                                                        }
+                                                        setShowSubMenu(false);
+                                                    }}
+                                                >
+                                                    {s.label}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
 
                             <button className="ctrl-btn" onClick={toggleFullscreen}>
                                 {isFullscreen ? (

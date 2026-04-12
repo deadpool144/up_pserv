@@ -6,14 +6,14 @@
  * - Rich console progress: per-step timing, summary box on completion
  */
 
-import { normalizeVideo, getVideoDuration } from './media.js';
-import { getMeta, saveMeta, indexMoofOffsets, vaultDataPath } from './storage.js';
-import { TMP_DIR, VAULT_DIR, QUEUE_CONCURRENCY } from './config.js';
-import path from 'path';
 import fs from 'fs-extra';
+import path from 'path';
 import crypto from 'crypto';
 import { pipeline } from 'stream/promises';
 import { getCipherAtOffset, getDecipherAtOffset } from './crypto.js';
+import { normalizeVideo, getVideoDuration, getSubtitleTracks, extractSubtitle } from './media.js';
+import { getMeta, saveMeta, indexMoofOffsets, vaultDataPath } from './storage.js';
+import { TMP_DIR, VAULT_DIR, QUEUE_CONCURRENCY } from './config.js';
 import { evictHLSCache } from './hlscache.js';
 import { getHWCaps } from './hwdetect.js';
 
@@ -154,7 +154,7 @@ class BackgroundQueue {
 
 
             // ── Step 1: Decrypt ───────────────────────────────────────────────
-            const endDecrypt = stepTimer('Step 1/5  Decrypt to temp');
+            const endDecrypt = stepTimer('Step 1/6  Decrypt to temp');
             if (decryptKey) {
                 const decipher = getDecipherAtOffset(decryptKey, nonce, 0);
                 await pipeline(fs.createReadStream(dp), decipher, fs.createWriteStream(rawTmp));
@@ -166,11 +166,34 @@ class BackgroundQueue {
             const rawStats = await fs.stat(rawTmp);
             if (rawStats.size < 100_000) throw new Error('Raw file too small (corrupt or incomplete)');
 
-            // ── Step 2: Normalize / transcode ─────────────────────────────────
+            // ── Step 2: Extract Subtitles (From Source) ───────────────────────
+            const endSubs = stepTimer('Step 2/6  Extract subtitles');
+            try {
+                // We extract from the raw source file BEFORE it is normalized/stripped
+                const tracks = await getSubtitleTracks(rawTmp);
+                if (tracks.length > 0) {
+                    const subInfo = [];
+                    for (let i = 0; i < tracks.length; i++) {
+                        const track = tracks[i];
+                        const subFileName = `sub_${i}.vtt`;
+                        const subPath = path.join(task.folder, subFileName);
+                        await extractSubtitle(rawTmp, track.index, subPath);
+                        subInfo.push({ index: i, label: track.label, lang: track.lang });
+                    }
+                    meta.subtitles = subInfo;
+                    await saveMeta(task.folder, meta);
+                    console.log(`  │   └─ Extracted ${tracks.length} track(s)`);
+                }
+            } catch (subErr: any) {
+                console.warn(`  │   [Subs] Extraction failed: ${subErr.message}`);
+            }
+            endSubs();
+
+            // ── Step 3: Normalize / transcode ─────────────────────────────────
             const isMKV = task.originalName.toLowerCase().endsWith('.mkv');
             const method = isMKV ? caps.encoder.toUpperCase() : 'Remux (Copy)';
             const modeLabel = isMKV ? `Full transcode (MKV→MP4) [Method: ${method}]` : 'Remux (copy + faststart) [Method: Instant]';
-            console.log(`  ├─ Step 2/5  ${modeLabel}`);
+            console.log(`  ├─ Step 3/6  ${modeLabel}`);
 
 
             const normStart = Date.now();
@@ -201,7 +224,7 @@ class BackgroundQueue {
             endEnc();
 
             // ── Step 5: Update meta + rebuild HLS index ───────────────────────
-            const endIdx  = stepTimer('Step 5/5  Rebuild HLS index');
+            const endIdx  = stepTimer('Step 5/6  Rebuild HLS index');
             const outSize = (await fs.stat(dp)).size;
             meta.nonce    = newNonce.toString('base64');
             meta.size     = outSize;
@@ -217,6 +240,8 @@ class BackgroundQueue {
             endIdx();
             console.log(`  │   └─ ${offsets.length} segments`);
 
+            // (Subtitle extraction removed from here, moved to Step 2)
+
             // ── Completion summary ────────────────────────────────────────────
             const totalMs = Date.now() - jobStart;
             console.log('│');
@@ -231,6 +256,14 @@ class BackgroundQueue {
             const totalMs = Date.now() - jobStart;
             console.log('│');
             console.log(`└─ ❌  FAILED  "${task.originalName}"  (after ${fmtMs(totalMs)})`);
+            
+            const isGPU = err.message.toLowerCase().includes('gpu') || 
+                          err.message.toLowerCase().includes('device') ||
+                          err.message.toLowerCase().includes('encoder');
+
+            if (isGPU) {
+                console.log(`   └─ ⚠️  Hardware acceleration failed. Falling back to CPU for future jobs.`);
+            }
             console.log(`   └─ ${err.message}`);
             console.log('');
             try {

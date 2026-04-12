@@ -34,6 +34,8 @@ export interface FileMeta {
     encLevel?: 0 | 1 | 2;
     isEncrypted?: boolean;
     thumb?: boolean;
+    subtitles?: { index: number, label: string, lang: string }[];
+    userKeyId?: string; // Fingerprint of the personal key (for isolation)
 }
 
 export async function saveMeta(folder: string, meta: FileMeta) {
@@ -179,7 +181,8 @@ export async function finalizeVaultItem(
     totalSize: number,
     encLevel: 0 | 1 | 2,
     shouldRandomize: boolean,
-    encKey: Buffer | null
+    encKey: Buffer | null,
+    userKeyId?: string | null
 ) {
     const enc_name = path.basename(tempDir);
     const mimeType = mime.lookup(originalName) || "application/octet-stream";
@@ -204,6 +207,7 @@ export async function finalizeVaultItem(
             status: mimeType.startsWith("video/") ? "processing" : "ready",
             encLevel,
             isEncrypted: encLevel > 0,
+            userKeyId: userKeyId || undefined
         };
         await saveMeta(tempDir, meta);
         if (await fs.pathExists(finalDir)) await fs.remove(finalDir);

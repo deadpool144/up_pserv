@@ -52,17 +52,17 @@ export async function detectHW(): Promise<HWCapabilities> {
 
     console.log(`[HWDetect] CPU: ${cpuCount} logical threads | Low-end: ${isLowEnd} | Concurrency: ${concurrency}`);
 
+    // ── Test QSV (Intel iGPU) ────────────────────────────────────────────────
+    if (testEncoder(ffmpegPath, 'h264_qsv')) {
+        console.log('[HWDetect] ✅ Intel QSV detected — prioritizing iGPU for efficiency');
+        _caps = { encoder: 'qsv', threads, concurrency, isLowEnd, ffmpegPath };
+        return _caps;
+    }
+
     // ── Test NVENC (NVIDIA) ──────────────────────────────────────────────────
     if (testEncoder(ffmpegPath, 'h264_nvenc')) {
         console.log('[HWDetect] ✅ NVIDIA NVENC detected — using GPU encoder');
         _caps = { encoder: 'nvenc', threads, concurrency, isLowEnd, ffmpegPath };
-        return _caps;
-    }
-
-    // ── Test QSV (Intel iGPU) ────────────────────────────────────────────────
-    if (testEncoder(ffmpegPath, 'h264_qsv')) {
-        console.log('[HWDetect] ✅ Intel QSV detected — using iGPU encoder');
-        _caps = { encoder: 'qsv', threads, concurrency, isLowEnd, ffmpegPath };
         return _caps;
     }
 
@@ -83,7 +83,7 @@ function testEncoder(ffmpegPath: string, encoderName: string): boolean {
         const args = encoderName === 'h264_nvenc'
             ? [
                 '-hide_banner', '-loglevel', 'error',
-                '-f', 'lavfi', '-i', 'color=black:s=128x128:r=1:d=0.1',
+                '-f', 'lavfi', '-i', 'color=black:s=64x64:r=1:d=0.1',
                 '-c:v', 'h264_nvenc',
                 '-frames:v', '1',
                 '-f', 'null', nullOut
@@ -93,7 +93,7 @@ function testEncoder(ffmpegPath: string, encoderName: string): boolean {
                 '-hide_banner', '-loglevel', 'error',
                 '-init_hw_device', 'qsv=qsv:hw',
                 '-filter_hw_device', 'qsv',
-                '-f', 'lavfi', '-i', 'color=black:s=128x128:r=1:d=0.1',
+                '-f', 'lavfi', '-i', 'color=black:s=64x64:r=1:d=0.1',
                 '-vf', 'hwupload=extra_hw_frames=64,format=qsv',
                 '-c:v', 'h264_qsv',
                 '-frames:v', '1',
@@ -101,14 +101,14 @@ function testEncoder(ffmpegPath: string, encoderName: string): boolean {
               ]
             : [
                 '-hide_banner', '-loglevel', 'error',
-                '-f', 'lavfi', '-i', 'color=black:s=128x128:r=1:d=0.1',
+                '-f', 'lavfi', '-i', 'color=black:s=64x64:r=1:d=0.1',
                 '-c:v', encoderName,
                 '-frames:v', '1',
                 '-f', 'null', nullOut
               ];
 
         const result = spawnSync(ffmpegPath, args, {
-            timeout: 8000, // 8s max for init; HDD + old GPU can be slow
+            timeout: 5000, // Reduced from 8s to speed up startup
             stdio: 'pipe'
         });
 

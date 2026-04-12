@@ -22,8 +22,10 @@ import { getAesKey, getCipherAtOffset } from './crypto.js';
 import { ACCESS_KEY, THUMBNAIL_DIR, CPU_THREADS } from './config.js';
 import { getHWCaps } from './hwdetect.js';
 
-if (ffmpegPath) {
-    ffmpeg.setFfmpegPath(ffmpegPath as any);
+const ffBin = (typeof ffmpegPath === 'string' ? ffmpegPath : (ffmpegPath as any)?.path) as string;
+
+if (ffBin) {
+    ffmpeg.setFfmpegPath(ffBin);
 }
 if (ffprobeStatic) {
     const p = typeof ffprobeStatic === 'string' ? ffprobeStatic : (ffprobeStatic as any).path;
@@ -187,10 +189,10 @@ function buildQSVArgs(inputPath: string, outputPath: string): string[] {
         '-c:v', 'h264_qsv',
         '-preset', 'veryfast',
         '-global_quality', '22',
-        '-look_ahead', '0',        // Disable lookahead — saves RAM on low-end iGPU
+        '-look_ahead', '0',
+        '-vf', 'vpp_qsv=format=nv12',    // Ensure hardware surface is NV12 (optimal for QSV enc)
         '-c:a', 'aac', '-b:a', '128k', '-ac', '2',
         '-map', '0:v:0?', '-map', '0:a:0?', '-sn',
-        '-pix_fmt', 'yuv420p',
         '-g', '48', '-keyint_min', '48', '-sc_threshold', '0',
         '-movflags', 'frag_keyframe+empty_moov+default_base_moof+faststart',
         '-f', 'mp4', '-y', outputPath
@@ -313,7 +315,7 @@ export async function normalizeVideo(
     outputPath: string,
     forceTranscode: boolean = false
 ): Promise<void> {
-    const ffBin = ffmpegPath as string;
+    const ffBin = (typeof ffmpegPath === 'string' ? ffmpegPath : (ffmpegPath as any)?.path) as string;
     if (!ffBin) throw new Error('FFmpeg path not found');
 
     // Quick-probe source duration so runFFmpeg can show % + ETA
@@ -429,6 +431,60 @@ export async function getVideoDuration(inputPath: string): Promise<number> {
 }
 
 /**
+ * Identifies subtitle tracks in a video file.
+ */
+export async function getSubtitleTracks(inputPath: string): Promise<{index: number, label: string, lang: string}[]> {
+    const { spawnSync } = await import('child_process');
+    const p = typeof ffprobeStatic === 'string' ? ffprobeStatic : (ffprobeStatic as any).path;
+    if (!p) throw new Error('ffprobe path not found');
+
+    const result = spawnSync(p, [
+        '-v', 'error',
+        '-select_streams', 's',
+        '-show_entries', 'stream=index:stream_tags=label,language',
+        '-of', 'json',
+        inputPath
+    ], { encoding: 'utf8' });
+
+    if (result.status !== 0) return [];
+    try {
+        const data = JSON.parse(result.stdout);
+        return (data.streams || []).map((s: any) => ({
+            index: s.index,
+            label: s.tags?.label || `Track ${s.index}`,
+            lang: s.tags?.language || 'und'
+        }));
+    } catch {
+        return [];
+    }
+}
+
+/**
+ * Extracts a subtitle track to a WebVTT file.
+ */
+export async function extractSubtitle(inputPath: string, streamIndex: number, outputPath: string): Promise<void> {
+    const ffBin = (typeof ffmpegPath === 'string' ? ffmpegPath : (ffmpegPath as any)?.path) as string;
+    if (!ffBin) throw new Error('FFmpeg path not found');
+
+    // Convert to webvtt for browser compatibility
+    const args = [
+        '-i', inputPath,
+        '-map', `0:${streamIndex}`,
+        '-f', 'webvtt',
+        '-y', outputPath
+    ];
+
+    await new Promise<void>((resolve, reject) => {
+        const proc = spawn(ffBin, args);
+        proc.on('close', (code) => {
+            if (code === 0) resolve();
+            else reject(new Error(`Subtitle extraction failed with code ${code}`));
+        });
+        proc.on('error', reject);
+    });
+}
+
+/**
  * Spawns a live FFmpeg process for on-the-fly streaming transcoding.
  * Automatically selects the best encoder. Falls back on stderr GPU errors.
  * Returns a ChildProcess: pipe data to stdin, read from stdout.
@@ -441,7 +497,7 @@ export function spawnStreamProcessor(
     if (!ffmpegPath) throw new Error('FFmpeg not found');
 
     const caps = getHWCaps();
-    const ffBin = ffmpegPath as string;
+    const ffBin = (typeof ffmpegPath === 'string' ? ffmpegPath : (ffmpegPath as any)?.path) as string;
 
     const baseInputArgs = [
         '-nostdin',
@@ -484,11 +540,12 @@ export function spawnStreamProcessor(
             '-c:v', 'h264_nvenc', '-preset', 'p2', '-rc', 'vbr', '-cq', '28'
         ]));
     } else if (caps.encoder === 'qsv') {
-        console.log('[Stream] Spawning QSV live transcode...');
+        console.log('[Stream] Spawning QSV live transcode (Full HW Acc)...');
         ff = spawn(ffBin, buildArgs([
             '-init_hw_device', 'qsv=qsv:hw', '-filter_hw_device', 'qsv',
             '-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv',
-            '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28', '-look_ahead', '0'
+            '-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '28', 
+            '-look_ahead', '0', '-vf', 'vpp_qsv=format=nv12'
         ]));
     } else {
         console.log(`[Stream] Spawning CPU live transcode (${caps.threads} threads)...`);

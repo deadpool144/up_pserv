@@ -12,6 +12,7 @@ export interface FileData {
     encLevel?: number;
     /** false = current user cannot decrypt this file */
     accessible?: boolean;
+    subtitles?: { index: number, label: string, lang: string }[];
 }
 
 interface FileCardProps {

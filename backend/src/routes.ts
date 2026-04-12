@@ -4,7 +4,7 @@ import { ACCESS_KEY, SECRET_KEY, TOKEN_TTL, THUMBNAIL_DIR, VAULT_DIR, TMP_DIR } 
 import { getDetailedListing, findItemPath, getMeta, vaultDataPath, writeToVault, finalizeVaultItem, isVaultItem, saveMeta, indexMoofOffsets } from './storage.js';
 
 import { generateThumbnail, getVideoDuration, normalizeVideo, STREAM_HWM } from './media.js';
-import { getAesKey, getCipherAtOffset, resolveDecryptKey } from './crypto.js';
+import { getAesKey, getCipherAtOffset, resolveDecryptKey, getUserKeyId } from './crypto.js';
 import { getHLSIndexCached, setHLSIndexCached, evictHLSCache } from './hlscache.js';
 import fs from 'fs-extra';
 import path from 'path';
@@ -36,13 +36,15 @@ export { evictHLSCache };  // re-export for convenience (admin reindex route)
 const KEY_BUFFER = getAesKey(ACCESS_KEY);
 
 // ── Token store ───────────────────────────────────────────────────────────────
-const tokens: Map<string, { expires: number, userKey: string }> = new Map();
+const tokens: Map<string, { expires: number, userKey: string, userKeyId?: string }> = new Map();
 
 function issueToken(userKey: string): string {
+    const userKeyId = getUserKeyId(SECRET_KEY, userKey) || undefined;
     const token = crypto.randomBytes(32).toString('hex');
     tokens.set(token, {
         expires: Date.now() + TOKEN_TTL * 1000,
-        userKey
+        userKey,
+        userKeyId
     });
     return token;
 }
@@ -67,6 +69,7 @@ const tokenRequired = (req: Request, res: Response, next: NextFunction) => {
     }
 
     res.locals.userKey = session.userKey;
+    res.locals.userKeyId = session.userKeyId;
     next();
 };
 
@@ -107,7 +110,18 @@ router.get('/files', tokenRequired, async (req: Request, res: Response) => {
             // Determine effective enc level (handle legacy files)
             const eLvl: number = d.encLevel ?? (d.isEncrypted === false ? 0 : 1);
             // Accessible = level 0/1 always, level 2 only if session has a userKey
-            const accessible = eLvl < 2 || userKey.length > 0;
+            // Accessible = level 0/1 always. 
+            // Level 2 only if session has a userKey AND it matches the file's userKeyId (if tagged)
+            let accessible = eLvl < 2;
+            if (eLvl === 2) {
+                if (userKey.length > 0) {
+                    // Isolation check: if the file has a userKeyId, it MUST match the session's ID.
+                    // If it doesn't have one (legacy), we allow any personal key to try.
+                    if (!d.userKeyId || d.userKeyId === res.locals.userKeyId) {
+                        accessible = true;
+                    }
+                }
+            }
 
             return {
                 id: d.id,
@@ -119,6 +133,7 @@ router.get('/files', tokenRequired, async (req: Request, res: Response) => {
                 accessible,
                 thumb: await fs.pathExists(path.join(THUMBNAIL_DIR, d.id)),
                 created: d.created_at,
+                subtitles: d.subtitles
             };
         }));
 
@@ -138,7 +153,14 @@ router.get('/file/:id', tokenRequired, async (req: Request, res: Response) => {
 
         const meta = await getMeta(folder);
         const eLvl: number = meta.encLevel ?? (meta.isEncrypted === false ? 0 : 1);
-        const accessible = eLvl < 2 || userKey.length > 0;
+        let accessible = eLvl < 2;
+        if (eLvl === 2) {
+            if (userKey.length > 0) {
+                if (!meta.userKeyId || meta.userKeyId === res.locals.userKeyId) {
+                    accessible = true;
+                }
+            }
+        }
 
         res.json({
             id: meta.id,
@@ -151,7 +173,8 @@ router.get('/file/:id', tokenRequired, async (req: Request, res: Response) => {
             status: meta.status ?? 'ready',
             encLevel: eLvl,
             accessible,
-            thumb: await fs.pathExists(path.join(THUMBNAIL_DIR, meta.id))
+            thumb: await fs.pathExists(path.join(THUMBNAIL_DIR, meta.id)),
+            subtitles: meta.subtitles
         });
     } catch (err) {
         console.error(err);
@@ -305,10 +328,17 @@ router.get(['/preview/:id', '/download/:id'], tokenRequired, async (req: Request
         const userKey: string = res.locals.userKey || '';
         const eLvl = meta.encLevel ?? (meta.isEncrypted === false ? 0 : 1);
 
-        // Block access to level-2 files if session has no personal key
-        if (eLvl === 2 && userKey.length === 0) {
-            if (!res.headersSent) res.status(403).json({ error: "Personal key required", encLevel: 2 });
-            return;
+        // Block access to level-2 files if session has no personal key OR the wrong key
+        if (eLvl === 2) {
+            if (userKey.length === 0) {
+                if (!res.headersSent) res.status(403).json({ error: "Personal key required", encLevel: 2 });
+                return;
+            }
+            // Isolation check (for tagged files)
+            if (meta.userKeyId && meta.userKeyId !== res.locals.userKeyId) {
+                if (!res.headersSent) res.status(403).json({ error: "Access denied: This file belongs to another key" });
+                return;
+            }
         }
 
         const decryptKey = resolveDecryptKey(meta.encLevel, meta.isEncrypted, KEY_BUFFER, SECRET_KEY, userKey);
@@ -454,37 +484,78 @@ router.get('/stream/:id/seg-:num.m4s', tokenRequired, async (req: Request, res: 
     }
 });
 
+// ── Subtitles ─────────────────────────────────────────────────────────────
+router.get('/subtitles/:id/:index', tokenRequired, async (req: Request, res: Response) => {
+    const { id, index } = req.params;
+    try {
+        const folder = await findItemPath(id as string);
+        if (!folder) return res.status(404).send('Not found');
+
+        const subPath = path.join(folder, `sub_${index}.vtt`);
+        if (!(await fs.pathExists(subPath))) return res.status(404).send('Subtitle not found');
+
+        res.setHeader('Content-Type', 'text/vtt');
+        res.setHeader('Cache-Control', 'public, max-age=3600');
+        fs.createReadStream(subPath).pipe(res);
+    } catch (err) {
+        console.error('[Subs] Serve error:', err);
+        res.status(500).send('Internal error');
+    }
+});
+
 // ── Thumbnails ───────────────────────────────────────────────────────────────
 router.get('/thumbnail/:id', tokenRequired, async (req: Request, res: Response) => {
     const encName = req.params.id as string;
-    const thPath = path.join(THUMBNAIL_DIR, encName);
+    const userKey: string = res.locals.userKey || '';
 
-    if (!(await fs.pathExists(thPath))) {
-        return res.status(404).send("Not found");
+    try {
+        const folder = await findItemPath(encName);
+        if (!folder) return res.status(404).json({ error: "Not found" });
+
+        const meta = await getMeta(folder);
+        const eLvl = meta.encLevel ?? (meta.isEncrypted === false ? 0 : 1);
+
+        // Block access to Level 2 thumbnails if session lacks a personal user key OR the wrong key
+        if (eLvl === 2) {
+            if (userKey.length === 0) {
+                return res.status(403).json({ error: "Personal key required for this content" });
+            }
+            if (meta.userKeyId && meta.userKeyId !== res.locals.userKeyId) {
+                return res.status(403).json({ error: "Access denied: Thumbnail belongs to another key" });
+            }
+        }
+
+        const thPath = path.join(THUMBNAIL_DIR, encName);
+        if (!(await fs.pathExists(thPath))) {
+            return res.status(404).send("Not found");
+        }
+
+        res.writeHead(200, { "Content-Type": "image/jpeg" });
+
+        const readStream = fs.createReadStream(thPath);
+        let headerHandled = false;
+        let decryptor: any = null;
+
+        readStream.on('data', (chunk: Buffer) => {
+            let data = chunk;
+            if (!headerHandled) {
+                const nonce = data.slice(0, 16);
+                data = data.slice(16);
+                decryptor = getCipherAtOffset(KEY_BUFFER, nonce, 0);
+                headerHandled = true;
+            }
+            if (data.length > 0) {
+                res.write(decryptor.update(data));
+            }
+        });
+
+        readStream.on('end', () => {
+            res.end();
+        });
+    } catch (err) {
+        console.error("[Thumbnail] Error:", err);
+        if (!res.headersSent) res.status(500).send("Internal Server Error");
     }
-
-    res.writeHead(200, { "Content-Type": "image/jpeg" });
-
-    const readStream = fs.createReadStream(thPath);
-    let headerHandled = false;
-    let decryptor: any = null;
-
-    readStream.on('data', (chunk: Buffer) => {
-        let data = chunk;
-        if (!headerHandled) {
-            const nonce = data.slice(0, 16);
-            data = data.slice(16);
-            decryptor = getCipherAtOffset(KEY_BUFFER, nonce, 0);
-            headerHandled = true;
-        }
-        if (data.length > 0) {
-            res.write(decryptor.update(data));
-        }
-    });
-
-    readStream.on('end', () => {
-        res.end();
-    });
 });
 
 // ── Delete ───────────────────────────────────────────────────────────────────
@@ -567,7 +638,7 @@ router.post('/upload-chunk', tokenRequired, async (req: Request, res: Response) 
     // Sequential upload: the last chunk index means we're done
     if (chunkIndex === totalChunks - 1) {
         const totalSize = globalOffset + data.length;
-        await finalizeVaultItem(tempDir, filename, nonce, totalSize, encLevel, shouldRandomize, encKey);
+        await finalizeVaultItem(tempDir, filename, nonce, totalSize, encLevel, shouldRandomize, encKey, res.locals.userKeyId);
         
         // Trigger background processing for videos
         if ((mime.lookup(filename) || "").toString().startsWith("video/")) {

@@ -31,6 +31,17 @@ export function deriveFinalKey(serverSecret: string, userKey: string): Buffer {
     return crypto.createHash('sha256').update(serverSecret + userKey).digest();
 }
 
+/** 
+ * Generates a public fingerprint (ID) for a user key. 
+ * Used to isolate files between different personal keys without storing the key itself.
+ */
+export function getUserKeyId(serverSecret: string, userKey: string): string | null {
+    if (!userKey) return null;
+    // We use a secondary hash of the derived key to act as a public ID
+    const derived = deriveFinalKey(serverSecret, userKey);
+    return crypto.createHash('sha256').update(derived).digest('hex').slice(0, 16);
+}
+
 export function processChunk(data: Buffer, key: Buffer, nonce: Buffer, offset: number): Buffer {
     const cipher = getCipherAtOffset(key, nonce, offset);
     return Buffer.concat([cipher.update(data), cipher.final()]);

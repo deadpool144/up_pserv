@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "node",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "rootDir": "src",
     "outDir": "dist",
     "strict": true,
@@ -10,8 +10,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "allowJs": true,
-    "resolveJsonModule": true,
-    "ignoreDeprecations": "6.0"
+    "resolveJsonModule": true
   },
   "include": ["src/**/*"]
 }

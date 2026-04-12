@@ -11,6 +11,7 @@ interface ViewerProps {
         name: string;
         type: string;
         size: number;
+        subtitles?: { index: number, label: string, lang: string }[];
     };
     token: string;
     onClose: () => void;
@@ -47,6 +48,38 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
         };
     }, []);
 
+    const [isFullscreen, setIsFullscreen] = React.useState(false);
+    
+    const toggleFullscreen = () => {
+        if (!document.fullscreenElement) {
+            viewerRef.current?.requestFullscreen().catch(err => console.error(err));
+            setIsFullscreen(true);
+        } else {
+            document.exitFullscreen();
+            setIsFullscreen(false);
+        }
+    };
+
+    // ── Global Hotkeys ────────────────────────────────────────────────────────
+    React.useEffect(() => {
+        const handleKeys = (e: KeyboardEvent) => {
+            if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+            if (e.key === 'f' || e.key === 'F') {
+                toggleFullscreen();
+            } else if (e.key === 'Escape') {
+                if (isFullscreen) {
+                    toggleFullscreen();
+                } else {
+                    onClose();
+                }
+            }
+        };
+
+        window.addEventListener('keydown', handleKeys);
+        return () => window.removeEventListener('keydown', handleKeys);
+    }, [onClose, isFullscreen]);
+
     const previewUrl = `/api/preview/${file.id}?token=${token}`;
 
     return (
@@ -59,7 +92,7 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
         >
             {/* Top action bar */}
             <div className={`viewer-actions ${isIdle ? 'actions-hidden' : 'actions-visible'}`} onClick={(e) => e.stopPropagation()}>
-                <button className="viewer-action-btn" onClick={onClose} title="Close">
+                <button className="viewer-action-btn" onClick={onClose} title="Close (Esc)">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
                 </button>
                 <a
@@ -98,8 +131,10 @@ const Viewer: React.FC<ViewerProps> = ({ file, token, onClose, onDelete, onNext,
                         token={token}
                         fileSize={file.size}
                         isIdle={isIdle}
+                        subtitles={file.subtitles}
                         onNext={onNext}
                         onPrev={onPrev}
+                        onClose={onClose}
                     />
                 ) : isAudio ? (
                     <AudioPlayer
