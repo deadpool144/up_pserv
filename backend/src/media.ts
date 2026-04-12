@@ -320,7 +320,7 @@ export async function normalizeVideo(
 
     // Quick-probe source duration so runFFmpeg can show % + ETA
     let srcDuration: number | undefined;
-    try { srcDuration = await getVideoDuration(inputPath); } catch { /* non-fatal */ }
+    try { srcDuration = (await getVideoMetadata(inputPath)).duration; } catch { /* non-fatal */ }
 
     if (!forceTranscode) {
         // Fast path: remux with faststart, no re-encode
@@ -387,7 +387,13 @@ export async function normalizeVideo(
 /**
  * Probes video duration using ffprobe (async, non-blocking).
  */
-export async function getVideoDuration(inputPath: string): Promise<number> {
+export interface VideoMetadata {
+    duration: number;
+    fps: number;
+    timescale: number;
+}
+
+export async function getVideoMetadata(inputPath: string): Promise<VideoMetadata> {
     const { spawnSync } = await import('child_process');
     const p = typeof ffprobeStatic === 'string' ? ffprobeStatic : (ffprobeStatic as any).path;
     if (!p) throw new Error('ffprobe path not found');
@@ -408,26 +414,44 @@ export async function getVideoDuration(inputPath: string): Promise<number> {
         data = runProbe([
             '-v', 'quiet', '-print_format', 'json',
             '-show_format', '-show_streams',
-            '-probesize', '50M',        // reduced from 100M to be politer on HDD
+            '-probesize', '50M',
             '-analyze_duration', '50M',
             inputPath
         ]);
     }
 
-    if (!data) return 0;
+    if (!data) return { duration: 0, fps: 23.976, timescale: 90000 };
 
     const formatDur = parseFloat(data.format?.duration || '0');
     let maxStreamDur = 0;
+    let fps = 23.976;
+    let timescale = 90000;
+
     for (const s of (data.streams || [])) {
         if (s.duration) {
             const sd = parseFloat(s.duration);
             if (sd > maxStreamDur) maxStreamDur = sd;
         }
+        // Extract frame rate and timescale (time_base) from video stream
+        if (s.codec_type === 'video') {
+            if (s.avg_frame_rate) {
+                const [num, den] = s.avg_frame_rate.split('/').map(Number);
+                if (num && den) {
+                    const calculated = num / den;
+                    if (calculated > 0) fps = calculated;
+                }
+            }
+            if (s.time_base) {
+                const [num, den] = s.time_base.split('/').map(Number);
+                // In MP4, timescale is the denominator of time_base (e.g. 1/30000)
+                if (den && den > 0) timescale = den;
+            }
+        }
     }
 
     const finalDur = Math.max(formatDur, maxStreamDur);
-    console.log(`[Probe] Duration: ${finalDur.toFixed(2)}s`);
-    return finalDur;
+    console.log(`[Probe] Duration: ${finalDur.toFixed(2)}s, FPS: ${fps.toFixed(3)}, Timescale: ${timescale}`);
+    return { duration: finalDur, fps, timescale };
 }
 
 /**
@@ -441,7 +465,7 @@ export async function getSubtitleTracks(inputPath: string): Promise<{index: numb
     const result = spawnSync(p, [
         '-v', 'error',
         '-select_streams', 's',
-        '-show_entries', 'stream=index:stream_tags=label,language',
+        '-show_entries', 'stream=index,codec_name:stream_tags=label,language',
         '-of', 'json',
         inputPath
     ], { encoding: 'utf8' });
@@ -449,11 +473,15 @@ export async function getSubtitleTracks(inputPath: string): Promise<{index: numb
     if (result.status !== 0) return [];
     try {
         const data = JSON.parse(result.stdout);
-        return (data.streams || []).map((s: any) => ({
-            index: s.index,
-            label: s.tags?.label || `Track ${s.index}`,
-            lang: s.tags?.language || 'und'
-        }));
+        const incompatibleCodecs = ['hdmv_pgs_subtitle', 'dvd_subtitle', 'dvbsub', 'xsub'];
+        
+        return (data.streams || [])
+            .filter((s: any) => !incompatibleCodecs.includes(s.codec_name))
+            .map((s: any) => ({
+                index: s.index,
+                label: s.tags?.label || `Track ${s.index}`,
+                lang: s.tags?.language || 'und'
+            }));
     } catch {
         return [];
     }

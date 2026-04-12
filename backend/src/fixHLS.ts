@@ -2,7 +2,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import { VAULT_DIR, TMP_DIR, ACCESS_KEY } from './config.js';
 import { isVaultItem, getMeta, saveMeta, vaultDataPath, indexMoofOffsets } from './storage.js';
-import { getVideoDuration } from './media.js';
+import { getVideoMetadata } from './media.js';
 import { getAesKey, getDecipherAtOffset } from './crypto.js'; // 🔥 FIX
 
 const KEY_BUFFER = getAesKey(ACCESS_KEY);
@@ -59,9 +59,9 @@ async function fix() {
             });
 
             // 🔥 Timeout protection (important)
-            const duration = await Promise.race([
-                getVideoDuration(rawTmp),
-                new Promise<number>((_, reject) =>
+            const { duration, fps, timescale } = await Promise.race([
+                getVideoMetadata(rawTmp),
+                new Promise<any>((_, reject) =>
                     setTimeout(() => reject(new Error("FFprobe timeout")), 15000)
                 )
             ]);
@@ -71,15 +71,17 @@ async function fix() {
             }
 
             meta.duration = duration;
+            meta.fps = fps;
+            meta.timescale = timescale;
             await saveMeta(p, meta);
 
             console.log(`[Success] ${meta.original} → ${duration.toFixed(2)}s`);
 
             // 🔥 Rebuild index
-            const offsets = await indexMoofOffsets(dp, nonce);
-            await fs.writeJson(path.join(p, "hls_index.json"), offsets);
-
-            console.log(`[Index] ${offsets.length} segments`);
+            const fragments = await indexMoofOffsets(dp, nonce, KEY_BUFFER);
+            await fs.writeJson(path.join(p, "hls_index.json"), fragments);
+            
+            console.log(`[Index] ${fragments.length} segments`);
 
         } catch (err: any) {
             console.error(`[Error] ${id}:`, err?.message || err);

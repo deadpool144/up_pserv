@@ -11,7 +11,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { pipeline } from 'stream/promises';
 import { getCipherAtOffset, getDecipherAtOffset } from './crypto.js';
-import { normalizeVideo, getVideoDuration, getSubtitleTracks, extractSubtitle } from './media.js';
+import { normalizeVideo, getVideoMetadata, getSubtitleTracks, extractSubtitle } from './media.js';
 import { getMeta, saveMeta, indexMoofOffsets, vaultDataPath } from './storage.js';
 import { TMP_DIR, VAULT_DIR, QUEUE_CONCURRENCY } from './config.js';
 import { evictHLSCache } from './hlscache.js';
@@ -177,12 +177,16 @@ class BackgroundQueue {
                         const track = tracks[i];
                         const subFileName = `sub_${i}.vtt`;
                         const subPath = path.join(task.folder, subFileName);
-                        await extractSubtitle(rawTmp, track.index, subPath);
-                        subInfo.push({ index: i, label: track.label, lang: track.lang });
+                        try {
+                            await extractSubtitle(rawTmp, track.index, subPath);
+                            subInfo.push({ index: i, label: track.label, lang: track.lang });
+                        } catch (indieErr) {
+                            console.warn(`  │   [Subs] Track ${i} extraction failed, skipping: ${indieErr}`);
+                        }
                     }
                     meta.subtitles = subInfo;
                     await saveMeta(task.folder, meta);
-                    console.log(`  │   └─ Extracted ${tracks.length} track(s)`);
+                    console.log(`  │   └─ Extracted ${subInfo.length} track(s)`);
                 }
             } catch (subErr: any) {
                 console.warn(`  │   [Subs] Extraction failed: ${subErr.message}`);
@@ -207,10 +211,10 @@ class BackgroundQueue {
 
             // ── Step 3: Probe duration ────────────────────────────────────────
             const endProbe = stepTimer('Step 3/5  Probe duration');
-            const duration = await getVideoDuration(normTmp);
+            const { duration, fps, timescale } = await getVideoMetadata(normTmp);
             endProbe();
             if (!duration || duration <= 0) throw new Error('Invalid duration after normalization');
-            console.log(`  │   └─ ${fmtDur(duration)}`);
+            console.log(`  │   └─ ${fmtDur(duration)}  (FPS: ${fps.toFixed(2)}, Timescale: ${timescale})`);
 
             // ── Step 4: Re-encrypt back to vault ──────────────────────────────
             const endEnc  = stepTimer('Step 4/5  Re-encrypt to vault');
@@ -229,26 +233,29 @@ class BackgroundQueue {
             meta.nonce    = newNonce.toString('base64');
             meta.size     = outSize;
             meta.duration = duration;
+            meta.fps      = fps;
+            meta.timescale = timescale;
             meta.status   = 'ready';
             meta.type     = 'video/mp4';
             await saveMeta(task.folder, meta);
 
-            const offsets = await indexMoofOffsets(dp, newNonce, decryptKey);
+            const fragments = await indexMoofOffsets(dp, newNonce, decryptKey);
 
-            await fs.writeJson(path.join(task.folder, 'hls_index.json'), offsets);
+            await fs.writeJson(path.join(task.folder, 'hls_index.json'), fragments);
             evictHLSCache(task.id);
             endIdx();
-            console.log(`  │   └─ ${offsets.length} segments`);
+            console.log(`  │   └─ ${fragments.length} segments`);
 
             // (Subtitle extraction removed from here, moved to Step 2)
 
+            // ── Completion summary ────────────────────────────────────────────
             // ── Completion summary ────────────────────────────────────────────
             const totalMs = Date.now() - jobStart;
             console.log('│');
             console.log(`└─ ✅  COMPLETE  "${task.originalName}"`);
             console.log(`   ├─ Video    : ${fmtDur(duration)}`);
             console.log(`   ├─ Output   : ${fmtBytes(outSize)}`);
-            console.log(`   ├─ Segments : ${offsets.length}`);
+            console.log(`   ├─ Segments : ${fragments.length}`);
             console.log(`   └─ Time     : ${fmtMs(totalMs)}`);
             console.log('');
 

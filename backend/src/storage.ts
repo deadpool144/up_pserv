@@ -15,8 +15,7 @@ import {
 
 import {
     generateThumbnail,
-    normalizeVideo,
-    getVideoDuration
+    normalizeVideo
 } from './media.js';
 
 const KEY_BUFFER = getAesKey(ACCESS_KEY);
@@ -36,6 +35,8 @@ export interface FileMeta {
     thumb?: boolean;
     subtitles?: { index: number, label: string, lang: string }[];
     userKeyId?: string; // Fingerprint of the personal key (for isolation)
+    fps?: number;      // Frame rate for precise HLS segment calculation
+    timescale?: number;// Core timescale for absolute fragment timing
 }
 
 export async function saveMeta(folder: string, meta: FileMeta) {
@@ -129,40 +130,90 @@ export async function writeToVault(
     }
 }
 
-export async function indexMoofOffsets(dp: string, nonce: Buffer, decryptKey: Buffer | null = null): Promise<number[]> {
-    const offsets: number[] = [];
-    const decipher = decryptKey ? getDecipherAtOffset(decryptKey, nonce, 0) : null;
+export interface FragmentIndex {
+    offset: number; // absolute byte offset in data.enc
+    time: number;   // baseMediaDecodeTime in ticks (timescale-dependent)
+}
+
+export async function indexMoofOffsets(dp: string, nonce: Buffer, decryptKey: Buffer | null = null): Promise<FragmentIndex[]> {
+    const fragments: FragmentIndex[] = [];
     const MOOF = Buffer.from('moof');
-    let position = 0;
+    const TFDT = Buffer.from('tfdt');
+    const TFHD = Buffer.from('tfhd');
+    
+    let bytesRead = 0;
     let buffer = Buffer.alloc(0);
+    let bufferStartOffset = 0;
+    let targetTrackId = -1; // Auto-lock onto the first video track we see
 
     const scanner = new Transform({
         transform(chunk, _, cb) {
             const bufferChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as any);
-            const decrypted = decipher ? decipher.update(bufferChunk) : bufferChunk;
+            const decrypted = decryptKey ? getDecipherAtOffset(decryptKey, nonce, bytesRead).update(bufferChunk) : bufferChunk;
+            bytesRead += bufferChunk.length;
+
             buffer = Buffer.concat([buffer, decrypted]);
             let idx;
+
             while ((idx = buffer.indexOf(MOOF)) !== -1) {
-                const start = position + idx - 4;
-                if (start >= 0) offsets.push(start);
-                buffer = buffer.slice(idx + 4);
-                position += idx + 4;
+                const moofStart = bufferStartOffset + idx - 4;
+                if (moofStart >= 0) {
+                    const searchWindow = buffer.slice(idx + 4, idx + 512); 
+                    
+                    let tfhdIdx = searchWindow.indexOf(TFHD);
+                    let trackId = -1;
+                    if (tfhdIdx !== -1) {
+                        trackId = searchWindow.readUInt32BE(tfhdIdx + 12);
+                    }
+
+                    // Auto-lock: The first track we see with timing info is our primary indexing track
+                    let tfdtIdx = searchWindow.indexOf(TFDT);
+                    if (tfdtIdx !== -1) {
+                        if (targetTrackId === -1) {
+                            targetTrackId = trackId;
+                        }
+
+                        // Only index if it matches the locked track ID
+                        if (trackId === targetTrackId) {
+                            const absTfdtIdx = tfdtIdx;
+                            const version = searchWindow[absTfdtIdx + 4];
+                            let decodeTime = 0;
+                            if (version === 0) {
+                                decodeTime = searchWindow.readUInt32BE(absTfdtIdx + 8);
+                            } else if (version === 1) {
+                                const high = searchWindow.readUInt32BE(absTfdtIdx + 8);
+                                const low = searchWindow.readUInt32BE(absTfdtIdx + 12);
+                                decodeTime = high * 4294967296 + low;
+                            }
+
+                            fragments.push({ offset: moofStart, time: decodeTime });
+                        }
+                    }
+                }
+
+                const advance = idx + 4;
+                buffer = buffer.slice(advance);
+                bufferStartOffset += advance;
             }
-            if (buffer.length > 8) {
-                const trim = buffer.length - 8;
-                buffer = buffer.slice(-8);
-                position += trim;
+
+            if (buffer.length > 1024) {
+                const keep = 512;
+                const trim = buffer.length - keep;
+                buffer = buffer.slice(-keep);
+                bufferStartOffset += trim;
             }
             cb();
         },
+
         flush(cb) {
-            if (decipher) decipher.final();
             cb();
         }
     });
 
     await pipeline(fs.createReadStream(dp), scanner, new PassThrough());
-    return offsets;
+    
+    fragments.sort((a, b) => a.offset - b.offset);
+    return fragments;
 }
 
 async function generateSafeThumbnail(dp: string, nonce: Buffer, mimeType: string, id: string, key: Buffer | null) {
@@ -182,7 +233,9 @@ export async function finalizeVaultItem(
     encLevel: 0 | 1 | 2,
     shouldRandomize: boolean,
     encKey: Buffer | null,
-    userKeyId?: string | null
+    userKeyId?: string | null,
+    fps?: number,
+    timescale?: number
 ) {
     const enc_name = path.basename(tempDir);
     const mimeType = mime.lookup(originalName) || "application/octet-stream";
@@ -207,7 +260,9 @@ export async function finalizeVaultItem(
             status: mimeType.startsWith("video/") ? "processing" : "ready",
             encLevel,
             isEncrypted: encLevel > 0,
-            userKeyId: userKeyId || undefined
+            userKeyId: userKeyId || undefined,
+            fps: fps || 23.976,
+            timescale: timescale || 90000
         };
         await saveMeta(tempDir, meta);
         if (await fs.pathExists(finalDir)) await fs.remove(finalDir);

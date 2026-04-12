@@ -1,9 +1,8 @@
 import { Router } from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import { ACCESS_KEY, SECRET_KEY, TOKEN_TTL, THUMBNAIL_DIR, VAULT_DIR, TMP_DIR } from './config.js';
-import { getDetailedListing, findItemPath, getMeta, vaultDataPath, writeToVault, finalizeVaultItem, isVaultItem, saveMeta, indexMoofOffsets } from './storage.js';
-
-import { generateThumbnail, getVideoDuration, normalizeVideo, STREAM_HWM } from './media.js';
+import { getDetailedListing, findItemPath, getMeta, vaultDataPath, writeToVault, finalizeVaultItem, isVaultItem, saveMeta, indexMoofOffsets, FragmentIndex } from './storage.js';
+import { generateThumbnail, getVideoMetadata, normalizeVideo, getSubtitleTracks, extractSubtitle, STREAM_HWM } from './media.js';
 import { getAesKey, getCipherAtOffset, resolveDecryptKey, getUserKeyId } from './crypto.js';
 import { getHLSIndexCached, setHLSIndexCached, evictHLSCache } from './hlscache.js';
 import fs from 'fs-extra';
@@ -16,15 +15,16 @@ import { repairQueue } from './queue.js';
 const router = Router();
 
 // ── HLS Index helper (uses shared in-memory cache) ─────────────────────────────
-async function getHLSIndex(id: string, indexPath: string, fileSize: number): Promise<number[]> {
+async function getHLSIndex(id: string, indexPath: string, fileSize: number): Promise<(number | FragmentIndex)[]> {
     const cached = getHLSIndexCached(id);
     if (cached) return cached;
 
-    let offsets: number[];
+    let offsets: (number | FragmentIndex)[];
     if (await fs.pathExists(indexPath)) {
         offsets = await fs.readJson(indexPath);
     } else {
         offsets = [];
+        // Sparse index for plain files
         for (let i = 0; i < fileSize; i += 10 * 1024 * 1024) offsets.push(i);
     }
 
@@ -373,14 +373,32 @@ router.get('/stream/:id/v.m3u8', tokenRequired, async (req: Request, res: Respon
 
         const indexPath = path.join(folder, 'hls_index.json');
         const offsets = await getHLSIndex(encId, indexPath, meta.size);
-
+        
         const duration = meta.duration || 0;
-        const segDuration = offsets.length > 0 ? (duration / offsets.length) : 10;
-        const targetDuration = Math.ceil(segDuration) + 2;
+        const timescale = meta.timescale || 90000;
 
-        let m3u8 = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:${targetDuration}\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI="init.mp4?token=${token}"\n`;
+        let m3u8 = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-MAP:URI="init.mp4?token=${token}"\n`;
+        
         for (let i = 0; i < offsets.length; i++) {
-            m3u8 += `#EXTINF:${segDuration.toFixed(3)},\nseg-${i}.m4s?token=${token}\n`;
+            let d = 0;
+            const current = offsets[i];
+            
+            // Handle new FragmentIndex structure vs legacy number[]
+            const currentTicks = typeof current === 'number' ? (i * (48 / (meta.fps || 23.976)) * timescale) : current.time;
+            
+            if (i < offsets.length - 1) {
+                const next = offsets[i + 1];
+                const nextTicks = typeof next === 'number' ? ((i + 1) * (48 / (meta.fps || 23.976)) * timescale) : next.time;
+                d = (nextTicks - currentTicks) / timescale;
+            } else {
+                // Last segment compensation
+                d = Math.max(0.1, duration - (currentTicks / timescale));
+            }
+
+            // Ensure duration is positive and sane
+            if (d <= 0 || isNaN(d)) d = (48 / (meta.fps || 23.976));
+
+            m3u8 += `#EXTINF:${d.toFixed(6)},\nseg-${i}.m4s?token=${token}\n`;
         }
         m3u8 += '#EXT-X-ENDLIST';
 
@@ -406,7 +424,7 @@ router.get('/stream/:id/init.mp4', tokenRequired, async (req: Request, res: Resp
     // Init segment: bytes 0 → first moof offset
     const indexPath = path.join(folder, 'hls_index.json');
     const offsets = await getHLSIndex(encId, indexPath, meta.size);
-    const end = offsets.length > 0 ? offsets[0] - 1 : 128 * 1024 - 1;
+    const end = (offsets && offsets.length > 0) ? (typeof offsets[0] === 'number' ? offsets[0] : offsets[0].offset) - 1 : 128 * 1024 - 1;
     const segLen = end + 1;
 
     res.setHeader('Content-Type', 'video/mp4');
@@ -449,10 +467,18 @@ router.get('/stream/:id/seg-:num.m4s', tokenRequired, async (req: Request, res: 
     const offsets = await getHLSIndex(encId, indexPath, meta.size);
 
     let start: number, end: number;
-    if (offsets.length > 0) {
-        if (segNum >= offsets.length) return res.status(404).send('End of stream');
-        start = offsets[segNum];
-        end = (segNum + 1 < offsets.length) ? offsets[segNum + 1] - 1 : meta.size - 1;
+    if (offsets && offsets.length > 0) {
+        if (segNum >= offsets.length) return res.status(404).send("Segment not found");
+
+        const current = offsets[segNum];
+        start = typeof current === 'number' ? current : current.offset;
+
+        if (segNum + 1 < offsets.length) {
+            const next = offsets[segNum + 1];
+            end = (typeof next === 'number' ? next : next.offset) - 1;
+        } else {
+            end = meta.size - 1;
+        }
     } else {
         const chunkSize = 2 * 1024 * 1024;
         start = segNum * chunkSize;
@@ -638,7 +664,21 @@ router.post('/upload-chunk', tokenRequired, async (req: Request, res: Response) 
     // Sequential upload: the last chunk index means we're done
     if (chunkIndex === totalChunks - 1) {
         const totalSize = globalOffset + data.length;
-        await finalizeVaultItem(tempDir, filename, nonce, totalSize, encLevel, shouldRandomize, encKey, res.locals.userKeyId);
+        
+        let fps = 23.976;
+        let timescale = 90000;
+        if ((mime.lookup(filename) || "").toString().startsWith("video/")) {
+            try {
+                const { getVideoMetadata } = await import('./media.js');
+                const vMeta = await getVideoMetadata(path.join(tempDir, filename));
+                fps = vMeta.fps;
+                timescale = vMeta.timescale;
+            } catch (err) {
+                console.warn("[Upload] Failed to probe FPS, defaulting to 23.976/90000");
+            }
+        }
+
+        await finalizeVaultItem(tempDir, filename, nonce, totalSize, encLevel, shouldRandomize, encKey, res.locals.userKeyId, fps, timescale);
         
         // Trigger background processing for videos
         if ((mime.lookup(filename) || "").toString().startsWith("video/")) {
@@ -791,49 +831,75 @@ router.get('/admin/reindex', tokenRequired, async (req: Request, res: Response) 
                     const rawTmp = path.join(TMP_DIR, `${id}_raw.mp4`);
                     const normTmp = path.join(TMP_DIR, `${id}_norm.mp4`);
 
-                    // 1. Decrypt (Robustly with pipeline)
-                    const { pipeline } = await import('stream/promises');
-                    const decryptor = getCipherAtOffset(KEY_BUFFER, oldNonce, 0);
+                    const decryptKey = resolveDecryptKey(meta.encLevel || 0, meta.isEncrypted || false, KEY_BUFFER, SECRET_KEY, res.locals.userKey || '');
+                    
+                    if (meta.encLevel && meta.encLevel > 0 && !decryptKey) {
+                        console.log(`[Admin] Skipping ${id}: Cannot decrypt (missing personal key in session)`);
+                        continue;
+                    }
 
+                    // 1. Decrypt
+                    const { pipeline } = await import('stream/promises');
                     if (await fs.pathExists(rawTmp)) await fs.remove(rawTmp);
                     if (await fs.pathExists(normTmp)) await fs.remove(normTmp);
 
-                    await pipeline(
-                        fs.createReadStream(dp),
-                        decryptor,
-                        fs.createWriteStream(rawTmp)
-                    );
+                    if (decryptKey) {
+                        const { getDecipherAtOffset } = await import('./crypto.js');
+                        const decryptor = getDecipherAtOffset(decryptKey, oldNonce, 0);
+                        await pipeline(fs.createReadStream(dp), decryptor, fs.createWriteStream(rawTmp));
+                    } else {
+                        await fs.copy(dp, rawTmp);
+                    }
 
-                    // 2. Transcode & Probe result
+                    // 2. Transcode & Subtitles
                     await normalizeVideo(rawTmp, normTmp, isMKV || force);
-                    const duration = await getVideoDuration(normTmp);
+                    const { duration, fps, timescale } = await getVideoMetadata(normTmp);
 
-                    // 3. Re-encrypt normalized back to data.enc (streaming)
+                    // Re-extract subtitles if missing or MKV
+                    const subTracks = await getSubtitleTracks(rawTmp);
+                    if (subTracks.length > 0) {
+                        const subInfo = [];
+                        for (let i = 0; i < subTracks.length; i++) {
+                            const track = subTracks[i];
+                            const subFileName = `sub_${i}.vtt`;
+                            const subPath = path.join(p, subFileName);
+                            try {
+                                await extractSubtitle(rawTmp, track.index, subPath);
+                                subInfo.push({ index: i, label: track.label, lang: track.lang });
+                            } catch (e) {
+                                console.warn(`[Admin] Subtitle track ${i} extraction failed: ${e}`);
+                            }
+                        }
+                        meta.subtitles = subInfo;
+                    }
+
+                    // 3. Re-encrypt
                     const newNonce = crypto.randomBytes(16);
-                    const encryptor = getCipherAtOffset(KEY_BUFFER, newNonce, 0);
-
-                    await pipeline(
-                        fs.createReadStream(normTmp),
-                        encryptor,
-                        fs.createWriteStream(dp)
-                    );
+                    if (decryptKey) {
+                        const encryptor = getCipherAtOffset(decryptKey, newNonce, 0);
+                        await pipeline(fs.createReadStream(normTmp), encryptor, fs.createWriteStream(dp));
+                    } else {
+                        await fs.copy(normTmp, dp);
+                    }
 
                     // 4. Update Meta & Index
                     meta.nonce = newNonce.toString('base64');
                     meta.size = (await fs.stat(dp)).size;
                     meta.type = 'video/mp4';
                     meta.duration = duration;
+                    meta.fps = fps;
+                    meta.timescale = timescale;
                     await saveMeta(p, meta);
 
-                    const offsets = await indexMoofOffsets(dp, newNonce);
+                    const offsets = await indexMoofOffsets(dp, newNonce, decryptKey);
                     await fs.writeJson(path.join(p, "hls_index.json"), offsets);
-                    evictHLSCache(id); // ← flush in-memory cache so next request re-reads
+                    evictHLSCache(id);
 
                     // 5. Cleanup
                     if (await fs.pathExists(rawTmp)) await fs.remove(rawTmp);
                     if (await fs.pathExists(normTmp)) await fs.remove(normTmp);
 
-                    console.log(`[Fixed] ${meta.original}: ${duration.toFixed(2)}s`);
+                    console.log(`[Fixed] ${meta.original}: ${duration.toFixed(2)}s, timescale: ${timescale}`);
                     count++;
                 }
             } catch (itemErr) {
